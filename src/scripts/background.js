@@ -252,6 +252,11 @@ function injectFetchInterceptor(tabId) {
                                 // 获取 operatorCount（注意：0 是有效值，不能用 ||）
                                 operatorCount = alpha.regular?.operatorCount ?? null;
 
+                                // SUPER 类型 multiplier 强制为 1
+                                if (alpha.type === 'SUPER') {
+                                    multiplier = 1;
+                                }
+
                                 isDataMap[alphaId] = { isPassed, multiplier, pyramids: pyramids.join(','), failedNumRA, failedNumPPA, operatorCount };
                             });
 
