@@ -2,7 +2,7 @@
     "manifest_version": 3,
     "name": "WorldQuant Scope",
     "description": "WorldQuant Scope is a browser extension that provides a set of tools to help you navigate the WorldQuant platform.",
-    "version": "0.10.20",
+    "version": "0.10.21",
     "author": "幻华",
     "icons": {
         "128": "img/logo.png"
