@@ -344,20 +344,14 @@ function injectListCorrelationsOnce(alphaIds, cachedData, isDataMap = {}) {
         const bookSizeCell = row.querySelector('.alphas-list-table__cell-content--bookSize');
         if (bookSizeCell) {
             const prodCorrValue = data?.result?.max;
-            // const failedRA = isData.failedNumRA ?? 0;
-            // const failedPPA = isData.failedNumPPA ?? 0;
 
             let displayProdCorr = '-';
             let prodCorrColorClass = '';
             if (prodCorrValue !== undefined) {
-                displayProdCorr = prodCorrValue.toFixed(4);
+                displayProdCorr = prodCorrValue.toFixed(2);
                 // Prod Corr 使用原来的样式逻辑
                 prodCorrColorClass = prodCorrValue > 0.7 ? 'high-corr' : (prodCorrValue > 0.5 ? 'medium-corr' : 'low-corr');
             }
-
-            // Failed RA 和 Failed PPA 的颜色逻辑：有失败为红色，无失败为绿色
-            // const failedRAColor = failedRA > 0 ? 'fail-color' : 'pass-color';
-            // const failedPPAColor = failedPPA > 0 ? 'fail-color' : 'pass-color';
 
             // Pyramid 信息
             const pyramids = isData.pyramids || '';

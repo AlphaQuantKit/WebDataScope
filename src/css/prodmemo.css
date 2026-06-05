@@ -100,14 +100,6 @@
     color: #ff4757;
 }
 .prod-corr-replaced{
-    /* font-family: Open Sans, Verdana, sans-serif; */
-    /* font-size: .75rem; */
-    /* font-stretch: normal;
-    font-style: normal; */
-    /* font-size: 12px; */
-    /* font-weight: 600; */
-    /* letter-spacing: normal;
-    line-height: normal; */
     text-align: left;
 }
 
@@ -150,10 +142,8 @@
     height: 18px;
     margin-top: 9px;
     border-radius: 3px;
-    font-size: 12px;
-    font-weight: bold;
     color: white;
-    cursor: pointer;
+    cursor: cursor;
 }
 
 /* Multiplier 徽章样式 */
@@ -166,15 +156,7 @@
     background: #3498db;
     color: white;
     border-radius: 4px;
-    font-size: 12px;
-    font-weight: 600;
     cursor: cursor;
-}
-
-/* Pyramid 标签样式 */
-.pyramid-badge {
-    /* font-weight: 600;
-    font-size: 11px; */
 }
 
 /* Operator Count 徽章样式 */
@@ -187,8 +169,6 @@
     background: #9b59b6;
     color: white;
     border-radius: 4px;
-    font-size: 12px;
-    font-weight: 600;
     cursor: cursor;
 }
 

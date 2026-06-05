@@ -463,7 +463,7 @@ function broadcastRequest(rec) {
     // 仅向 platform.worldquantbrain.com 的标签分发
     chrome.tabs.query({ url: '*://platform.worldquantbrain.com/*' }, (tabs) => {
         for (const t of tabs) {
-            chrome.tabs.sendMessage(t.id, { type: 'REQ_MONITOR_NEW', data: rec });
+            chrome.tabs.sendMessage(t.id, { type: 'REQ_MONITOR_NEW', data: rec }).catch(() => {});
         }
     });
 }
@@ -499,6 +499,10 @@ async function checkUpdate() {
                 `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest`
             );
             const data = await response.json();
+            if (!data?.tag_name) {
+                console.log('[WQP] 检查更新失败：无法获取最新版本信息', data);
+                return;
+            }
             const latestVersion = data.tag_name.replace(/^v/, ''); // 去除可能的v前缀
             const currentVersion = chrome.runtime.getManifest().version;
             console.log('最新版本:', latestVersion, '当前版本:', currentVersion);

@@ -292,6 +292,8 @@ async function updateCardInfo(dataId, data, updateDataCallback) {
 }
 
 async function showDataCard(event) {
+    // 扩展热重载后上下文失效，静默忽略
+    if (!chrome.runtime?.id) return;
     // 显示数据卡片
     chrome.storage.local.get('WQPSettings', async ({ WQPSettings }) => {
         if (WQPSettings.dataAnalysisEnabled) {
