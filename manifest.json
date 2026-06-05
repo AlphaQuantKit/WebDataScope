@@ -18,12 +18,6 @@
     },
     "content_scripts": [
         {
-            "matches": ["https://platform.worldquantbrain.com/*"],
-            "run_at": "document_start",
-            "world": "MAIN",
-            "js": ["src/scripts/patchColumns.js"]
-        },
-        {
             "matches": [
                 "*://platform.worldquantbrain.com/*"
             ],
@@ -37,7 +31,6 @@
                 "src/scripts/utils.js",
                 "src/scripts/uiCard.js",
                 "src/scripts/dataAna.js",
-                "src/scripts/noMoreDifficulties.js",
                 "src/scripts/requestMonitorUI.js"
             ],
             "css": [

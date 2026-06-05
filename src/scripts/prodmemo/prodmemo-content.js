@@ -344,8 +344,8 @@ function injectListCorrelationsOnce(alphaIds, cachedData, isDataMap = {}) {
         const bookSizeCell = row.querySelector('.alphas-list-table__cell-content--bookSize');
         if (bookSizeCell) {
             const prodCorrValue = data?.result?.max;
-            const failedRA = isData.failedNumRA ?? 0;
-            const failedPPA = isData.failedNumPPA ?? 0;
+            // const failedRA = isData.failedNumRA ?? 0;
+            // const failedPPA = isData.failedNumPPA ?? 0;
 
             let displayProdCorr = '-';
             let prodCorrColorClass = '';
@@ -356,33 +356,40 @@ function injectListCorrelationsOnce(alphaIds, cachedData, isDataMap = {}) {
             }
 
             // Failed RA 和 Failed PPA 的颜色逻辑：有失败为红色，无失败为绿色
-            const failedRAColor = failedRA > 0 ? 'fail-color' : 'pass-color';
-            const failedPPAColor = failedPPA > 0 ? 'fail-color' : 'pass-color';
+            // const failedRAColor = failedRA > 0 ? 'fail-color' : 'pass-color';
+            // const failedPPAColor = failedPPA > 0 ? 'fail-color' : 'pass-color';
+
+            // Pyramid 信息
+            const pyramids = isData.pyramids || '';
 
             bookSizeCell.className = `alphas-list-table__cell-content alphas-list-table__cell-content--number alphas-list-table__cell-content--bookSize prod-corr-replaced`;
-            bookSizeCell.innerHTML = `<div><span class="${failedRAColor}">${failedRA}</span> <span class="${failedPPAColor}">${failedPPA}</span> <span class="${prodCorrColorClass}">${displayProdCorr}</span></div>`;
+            // bookSizeCell.innerHTML = `<div><span class="pyramid-badge">${pyramids}</span> <span class="${failedRAColor}">${failedRA}</span> <span class="${failedPPAColor}">${failedPPA}</span> <span class="${prodCorrColorClass}">${displayProdCorr}</span></div>`;
+            bookSizeCell.innerHTML = `<div><span class="${prodCorrColorClass}">${displayProdCorr}</span> <span class="pyramid-badge">${pyramids}</span></div>`;
         }
 
-        // IS Checks 图标替换
+        // IS Checks 图标 - 基于 failedNumRA / failedNumPPA
         const codeBtn = row.querySelector('.alphas-list-table__clickable-icon.code-btn');
         if (codeBtn) {
-            const isPassed = isData.isPassed;
-            let isIcon = '';
-            let isClass = '';
-            let tooltip = '';
+            const failedRA = isData.failedNumRA ?? 0;
+            const failedPPA = isData.failedNumPPA ?? 0;
 
-            if (isPassed === true) {
+            let isIcon, isClass, tooltip;
+
+            if (failedRA === 0) {
+                // RA 全过 → 绿色通过
                 isIcon = '✓';
                 isClass = 'is-pass';
                 tooltip = 'IS Passed';
-            } else if (isPassed === false) {
+            } else if (failedPPA === 0) {
+                // RA 有失败但 PPA 全过 → 黄色警告
+                isIcon = '⚠';
+                isClass = 'is-warn';
+                tooltip = `RA Failed(${failedRA}), PPA Passed`;
+            } else {
+                // RA 和 PPA 都有失败 → 红色失败
                 isIcon = '✗';
                 isClass = 'is-fail';
-                tooltip = 'IS Failed';
-            } else {
-                isIcon = '-';
-                isClass = 'is-unknown';
-                tooltip = 'No IS data';
+                tooltip = `RA Failed(${failedRA}), PPA Failed(${failedPPA})`;
             }
 
             codeBtn.innerHTML = `<span class="is-check-icon ${isClass}" title="${tooltip}">${isIcon}</span>`;

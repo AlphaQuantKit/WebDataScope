@@ -165,9 +165,34 @@ function injectFetchInterceptor(tabId) {
             window.fetch = async function (...args) {
                 
                 const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
+                const method = typeof args[0] === 'string' ? (args[1]?.method || 'GET') : (args[0]?.method || 'GET');
 
-                // 执行原始请求
-                const response = await originalFetch.apply(this, args);
+                // 重试逻辑：仅对 WQ API 的 GET 请求启用网络错误和服务端错误重试
+                const maxRetries = 10;
+                const retryStatuses = [429, 500, 502, 503, 504];
+                const isTarget = method.toUpperCase() === 'GET' && url.startsWith('https://api.worldquantbrain.com/');
+
+                const fetchWithRetry = async (retryCount = 0) => {
+                    try {
+                        const res = await originalFetch.apply(this, args);
+                        if (isTarget && retryStatuses.includes(res.status) && retryCount < maxRetries) {
+                            console.log(`[WQP] 请求失败(${res.status})，第${retryCount + 1}次重试: ${url}`);
+                            await new Promise(r => setTimeout(r, (retryCount + 1) * 500));
+                            return fetchWithRetry(retryCount + 1);
+                        }
+                        return res;
+                    } catch (err) {
+                        if (isTarget && retryCount < maxRetries && err.message?.includes('Failed to fetch')) {
+                            console.log(`[WQP] 网络错误，第${retryCount + 1}次重试: ${url}`);
+                            await new Promise(r => setTimeout(r, (retryCount + 1) * 500));
+                            return fetchWithRetry(retryCount + 1);
+                        }
+                        throw err;
+                    }
+                };
+
+                // 执行原始请求（带重试）
+                const response = await fetchWithRetry();
                 // ========== ProdMemo 拦截逻辑 ==========
                 try {
                     const responseUrl = response.url;
@@ -221,7 +246,7 @@ function injectFetchInterceptor(tabId) {
                             const isDataMap = {};
                             modifiedData.results.forEach(alpha => {
                                 const alphaId = alpha.id;
-                                let isPassed = null;
+                                // let isPassed = null;
                                 let multiplier = null;
                                 let pyramids = [];
                                 let failedNumRA = 0;
@@ -230,8 +255,8 @@ function injectFetchInterceptor(tabId) {
 
                                 if (alpha.is && alpha.is.checks) {
                                     const checks = alpha.is.checks;
-                                    const hasFail = checks.some(c => c?.result === 'FAIL');
-                                    isPassed = !hasFail;
+                                    // const hasFail = checks.some(c => c?.result === 'FAIL');
+                                    // isPassed = !hasFail;
 
                                     const pyramidCheck = checks.find(c => c && c.name === 'MATCHES_PYRAMID');
                                     if (pyramidCheck) {
@@ -257,7 +282,8 @@ function injectFetchInterceptor(tabId) {
                                     multiplier = 1;
                                 }
 
-                                isDataMap[alphaId] = { isPassed, multiplier, pyramids: pyramids.join(','), failedNumRA, failedNumPPA, operatorCount };
+                                // isDataMap[alphaId] = { isPassed, multiplier, pyramids: pyramids.join('/'), failedNumRA, failedNumPPA, operatorCount };
+                                isDataMap[alphaId] = {multiplier, pyramids: pyramids.join('/'), failedNumRA, failedNumPPA, operatorCount };
                             });
 
                             window.postMessage({
