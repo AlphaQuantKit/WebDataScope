@@ -369,16 +369,18 @@ function injectListCorrelationsOnce(alphaIds, cachedData, isDataMap = {}) {
 
             let isIcon, isClass, tooltip;
 
-            if (failedRA === 0) {
-                // RA 全过 → 绿色通过
-                isIcon = '✓';
-                isClass = 'is-pass';
-                tooltip = 'IS Passed';
-            } else if (failedPPA === 0) {
-                // RA 有失败但 PPA 全过 → 黄色警告
-                isIcon = '⚠';
-                isClass = 'is-warn';
-                tooltip = `RA Failed(${failedRA}), PPA Passed`;
+            if (isData.isPassed === true) {
+                if (failedRA === 0) {
+                     // RA 全过 → 绿色通过
+                    isIcon = '✓';
+                    isClass = 'is-pass';
+                    tooltip = 'IS Passed';
+                } else {
+                    // RA 有失败但 PPA 全过 → 黄色警告
+                    isIcon = '⚠';
+                    isClass = 'is-warn';
+                    tooltip = `RA Failed(${failedRA}), PPA Passed`;
+                }
             } else {
                 // RA 和 PPA 都有失败 → 红色失败
                 isIcon = '✗';

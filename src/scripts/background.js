@@ -246,7 +246,7 @@ function injectFetchInterceptor(tabId) {
                             const isDataMap = {};
                             modifiedData.results.forEach(alpha => {
                                 const alphaId = alpha.id;
-                                // let isPassed = null;
+                                let isPassed = null;
                                 let multiplier = null;
                                 let pyramids = [];
                                 let failedNumRA = 0;
@@ -255,8 +255,8 @@ function injectFetchInterceptor(tabId) {
 
                                 if (alpha.is && alpha.is.checks) {
                                     const checks = alpha.is.checks;
-                                    // const hasFail = checks.some(c => c?.result === 'FAIL');
-                                    // isPassed = !hasFail;
+                                    const hasFail = checks.some(c => c?.result === 'FAIL');
+                                    isPassed = !hasFail;
 
                                     const pyramidCheck = checks.find(c => c && c.name === 'MATCHES_PYRAMID');
                                     if (pyramidCheck) {
@@ -282,8 +282,7 @@ function injectFetchInterceptor(tabId) {
                                     multiplier = 1;
                                 }
 
-                                // isDataMap[alphaId] = { isPassed, multiplier, pyramids: pyramids.join('/'), failedNumRA, failedNumPPA, operatorCount };
-                                isDataMap[alphaId] = {multiplier, pyramids: pyramids.join('/'), failedNumRA, failedNumPPA, operatorCount };
+                                isDataMap[alphaId] = { isPassed, multiplier, pyramids: pyramids.join('/'), failedNumRA, failedNumPPA, operatorCount };
                             });
 
                             window.postMessage({
