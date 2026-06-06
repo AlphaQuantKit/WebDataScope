@@ -348,7 +348,7 @@ function injectListCorrelationsOnce(alphaIds, cachedData, isDataMap = {}) {
             let displayProdCorr = '-';
             let prodCorrColorClass = '';
             if (prodCorrValue !== undefined) {
-                displayProdCorr = prodCorrValue.toFixed(2);
+                displayProdCorr = (Math.trunc(prodCorrValue * 100) / 100).toFixed(2);
                 // Prod Corr 使用原来的样式逻辑
                 prodCorrColorClass = prodCorrValue > 0.7 ? 'high-corr' : (prodCorrValue > 0.5 ? 'medium-corr' : 'low-corr');
             }
