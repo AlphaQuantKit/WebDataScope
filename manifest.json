@@ -26,6 +26,12 @@
             "js": ["src/content/platform/common/patchColumns.js"]
         },
         {
+            "matches": ["https://platform.worldquantbrain.com/*"],
+            "run_at": "document_start",
+            "world": "MAIN",
+            "js": ["src/content/platform/common/alphaRowOverlay.js"]
+        },
+        {
             "matches": [
                 "*://platform.worldquantbrain.com/*"
             ],

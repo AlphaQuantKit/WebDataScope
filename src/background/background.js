@@ -339,18 +339,22 @@ function injectFetchInterceptor(tabId) {
                         item.is.failedNumPPA = 0;
                         return;
                     }
+                    item.is.failedNum = item.is.checks.filter(check => 
+                         check.result === 'FAIL'
+                    ).length;
                     item.is.failedNumRA = item.is.checks.filter(check => 
                         RA_CHECK_NAMES.includes(check.name) && check.result !== 'PASS' && check.result !== 'PENDING'
                     ).length;
                     
                     item.is.failedNumPPA = item.is.checks.filter(check => 
-                        (PPA_CHECK_NAMES.includes(check.name) && check.result !== 'PASS' && check.result !== 'PENDING') || (check.name === "LOW_SHARPE" && check.value < 1)
+                        PPA_CHECK_NAMES.includes(check.name) && check.result === 'FAIL'
                     ).length;
                     
-                    item.is.WQPPYS = item.is.checks
-                        .find(check => check.name === "MATCHES_PYRAMID")?.pyramids
+                    const pyramidCheck = item.is.checks.find(check => check.name === "MATCHES_PYRAMID");
+                    item.is.WQPPYS = pyramidCheck?.pyramids
                         ?.map(pyramid => (pyramid.name?.split('/').pop() || '').toLowerCase())
                         ?.join('/') || '';
+                    item.is.pyramidMultiplier = pyramidCheck?.multiplier ?? null;
 
                     
                 });
@@ -405,7 +409,29 @@ function injectFetchInterceptor(tabId) {
                         // 👉 自定义你的修改逻辑
                         const modifiedData = getAlphaCheckStates(originalData);
                         console.log('拦截并修改了 alphas 响应：', modifiedData);
-                        
+
+                        // 每次重置用新的Map
+                        window.__wqp_alpha_checks = new Map();
+                        if (modifiedData.results) {
+                            modifiedData.results.forEach(item => {
+                                if (item.id) {
+                                    window.__wqp_alpha_checks.set(item.id, {
+                                        maxProdCorr: item.maxProdCorr ?? '',
+                                        maxPoolProdCorr: item.maxPoolProdCorr ?? '',
+                                        maxSelfCorr: item.maxSelfCorr ?? '',
+                                        failedNum: item.is?.failedNum ?? 0,
+                                        failedNumRA: item.is?.failedNumRA ?? 0,
+                                        failedNumPPA: item.is?.failedNumPPA ?? 0,
+                                        pyramidMultiplier: item.is?.pyramidMultiplier ?? null,
+                                        operatorCount: item.regular?.operatorCount ?? null,
+                                        type: item.type || item.settings?.type || null,
+                                        WQPPYS: item.is?.WQPPYS || '',
+                                    });
+                                }
+                            });
+                        }
+                        window.dispatchEvent(new CustomEvent('__wqp_alpha_checks_updated'));
+
                         // 构造新 Response 返回给前端
                         return new Response(JSON.stringify(modifiedData), {
                             status: response.status,
