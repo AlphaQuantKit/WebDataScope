@@ -347,7 +347,7 @@ function injectFetchInterceptor(tabId) {
                     ).length;
                     
                     item.is.failedNumPPA = item.is.checks.filter(check => 
-                        PPA_CHECK_NAMES.includes(check.name) && check.result === 'FAIL'
+                        PPA_CHECK_NAMES.includes(check.name) && check.result !== 'PASS' && check.result !== 'PENDING'
                     ).length;
                     
                     const pyramidCheck = item.is.checks.find(check => check.name === "MATCHES_PYRAMID");
