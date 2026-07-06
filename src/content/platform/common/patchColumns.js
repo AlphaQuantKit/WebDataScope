@@ -5,8 +5,7 @@
     // 这与油猴的效果完全等价。
 
     const SEARCH = 'kC.SUBMITTED?[l]:[c],...a?[d]:[],{';
-    const VERSION_REGEX = /version:\s*"1\.0\.6"/;
-    const VERSION_REPLACE = 'version:"1.0.6-wqp9"';
+
 
     const EXTRA_COLUMNS = [
         {
@@ -106,15 +105,14 @@
             let patched = false;
             if (code.includes(SEARCH)) {
                 code = code.replace(SEARCH, buildReplacement());
-                code = code.replace('readOnly:!0,display:!0,', 'readOnly:!1,display:!0,');
                 console.log('[WQP] patchColumns: 成功注入列定义', src);
                 patched = true;
             } else {
-                console.warn('[WQP] patchColumns: 未找到列特征串，直接执行原始代码', src);
-            }
-            if (patched && VERSION_REGEX.test(code)) {
-                code = code.replace(VERSION_REGEX, VERSION_REPLACE);
-                console.log('[WQP] patchColumns: 成功升级 version，强制刷新 localStorage 缓存', src);
+                console.warn('[WQP] patchColumns: 未找到列特征串，回退原始加载', src);
+                const s = document.createElement('script');
+                s.src = src;
+                document.head.appendChild(s);
+                return;
             }
             const s = document.createElement('script');
             s.textContent = code;
