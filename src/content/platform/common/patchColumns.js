@@ -100,21 +100,22 @@
         return `kC.SUBMITTED?[l]:[c],...a?[d]:[],${colsJson},{`;
     }
 
+    let patched = false;
+
     async function fetchPatchAndRun(src) {
         try {
             let code = await (await fetch(src)).text();
-            let patched = false;
             if (code.includes(SEARCH)) {
                 code = code.replace(SEARCH, buildReplacement());
                 code = code.replace('readOnly:!0,display:!0,', 'readOnly:!1,display:!0,');
                 console.log('[WQP] patchColumns: 成功注入列定义', src);
                 patched = true;
+                if (VERSION_REGEX.test(code)) {
+                    code = code.replace(VERSION_REGEX, VERSION_REPLACE);
+                    console.log('[WQP] patchColumns: 成功升级 version，强制刷新 localStorage 缓存', src);
+                }
             } else {
                 console.warn('[WQP] patchColumns: 未找到列特征串，直接执行原始代码', src);
-            }
-            if (patched && VERSION_REGEX.test(code)) {
-                code = code.replace(VERSION_REGEX, VERSION_REPLACE);
-                console.log('[WQP] patchColumns: 成功升级 version，强制刷新 localStorage 缓存', src);
             }
             const s = document.createElement('script');
             s.textContent = code;
@@ -128,7 +129,13 @@
         }
     }
 
-    new MutationObserver((mutations) => {
+    const observer = new MutationObserver((mutations) => {
+        // patch 成功后不再处理后续 script（通常只有一个 chunk 含列定义）
+        if (patched) {
+            observer.disconnect();
+            console.log('[WQP] patchColumns: patch 完成，observer 已 disconnect');
+            return;
+        }
         for (const mutation of mutations) {
             for (const node of mutation.addedNodes) {
                 if (
@@ -144,7 +151,8 @@
                 }
             }
         }
-    }).observe(document, { childList: true, subtree: true });
+    });
+    observer.observe(document, { childList: true, subtree: true });
 
     console.log('[WQP] patchColumns: MutationObserver 已在 MAIN world 启动');
 })();

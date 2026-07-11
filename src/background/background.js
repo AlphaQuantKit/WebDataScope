@@ -351,8 +351,8 @@ function injectFetchInterceptor(tabId) {
                         .find(check => check.name === "MATCHES_PYRAMID")?.pyramids
                         ?.map(pyramid => (pyramid.name?.split('/').pop() || '').toLowerCase())
                         ?.join('/') || '';
-
-                    
+                    // 从 MATCHES_PYRAMID check 提取 pyramid multiplier（顶层 multiplier 字段）
+                    item.pyramidMultiplier = item.is.checks.find(check => check.name === "MATCHES_PYRAMID")?.multiplier ?? null;
                 });
                 return originalData;
             }
@@ -365,8 +365,53 @@ function injectFetchInterceptor(tabId) {
                 const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
                 captureSessionTokenFromFetchArgs(args[0], args[1]);
 
-                // 执行原始请求
-                const response = await originalFetch.apply(this, args);
+                // ---- GET 请求重试逻辑（原 noMoreDifficulties.js，现合并到此处避免 CSP 内联脚本限制） ----
+                // 原 noMoreDifficulties.js 通过 patch WQ 平台 JS 暴露内部变量实现重试，
+                // 但 innerHTML 注入内联 <script> 违反页面 CSP 'script-src'（无 'unsafe-inline'）被拦截。
+                // 此处已在 MAIN world（chrome.scripting.executeScript 注入），不受页面 CSP 限制。
+                // 用标准参数解析替代原 z(e)/O(e)（WQ 内部工具函数），效果等价。
+                const method = (
+                    args[0] instanceof Request ? args[0].method :
+                    (args[1]?.method || 'GET')
+                ).toUpperCase();
+                const isTargetRetry =
+                    method === 'GET' &&
+                    url.startsWith('https://api.worldquantbrain.com/');
+
+                const MAX_RETRIES = 10;
+                const RETRY_STATUSES = [429, 500, 502, 503, 504];
+                let retryCount = 0;
+
+                const attemptFetch = async () => {
+                    let response;
+                    try {
+                        response = await originalFetch.apply(this, args);
+                    } catch (error) {
+                        if (isTargetRetry &&
+                            retryCount < MAX_RETRIES &&
+                            error.message && error.message.includes('Failed to fetch')) {
+                            retryCount++;
+                            const delay = retryCount * 500;
+                            console.log(`[WQP Retry] 网络错误: ${error.message}，第${retryCount}次重试，URL: ${url}`);
+                            await new Promise(resolve => setTimeout(resolve, delay));
+                            return attemptFetch();
+                        }
+                        throw error;
+                    }
+                    if (isTargetRetry &&
+                        RETRY_STATUSES.includes(response.status) &&
+                        retryCount < MAX_RETRIES) {
+                        retryCount++;
+                        const delay = retryCount * 500;
+                        console.log(`[WQP Retry] 状态码: ${response.status}，第${retryCount}次重试，URL: ${url}`);
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        return attemptFetch();
+                    }
+                    return response;
+                };
+
+                // 执行请求（带重试）
+                const response = await attemptFetch();
 
                 if (url && url.includes('/alphas/') && url.includes('/correlations/')) {
                     try {
@@ -399,18 +444,53 @@ function injectFetchInterceptor(tabId) {
                 // 拦截并修改目标接口的响应
                 if (url && url.includes("https://api.worldquantbrain.com/users/self/alphas?")) {
                     try {
-                        const clone = response.clone();
-                        let originalData = await clone.json();
+                        console.log('[WQP] 拦截 alphas 请求:', url);
+                        // 直接消费原始 response 的 body stream（不再 clone）
+                        // 原 response.clone() 会 tee 出两个分支，clone 分支被 .json() 消费，
+                        // 但原始 response 分支从未被消费/取消 → body stream 缓冲区持久泄漏
+                        let originalData = await response.json();
 
                         // 👉 自定义你的修改逻辑
                         const modifiedData = getAlphaCheckStates(originalData);
                         console.log('拦截并修改了 alphas 响应：', modifiedData);
-                        
+
+                        // 填充 window.__wqp_alpha_checks 供 alphaRowOverlay.js 读取
+                        // 必须每次清空再填充：否则改过滤条件后旧页数据残留，新页只有 1 条但 Map 累计 11 条
+                        // 残留的旧 alphaId 在新页面上找不到对应 row，导致 processRow 早退且不设 done 标记
+                        if (!window.__wqp_alpha_checks) {
+                            window.__wqp_alpha_checks = new Map();
+                        } else {
+                            window.__wqp_alpha_checks.clear();
+                        }
+                        if (modifiedData.results) {
+                            modifiedData.results.forEach(item => {
+                                if (item.id) {
+                                    window.__wqp_alpha_checks.set(item.id, {
+                                        maxProdCorr: item.maxProdCorr ?? '',
+                                        maxPoolProdCorr: item.maxPoolProdCorr ?? '',
+                                        maxSelfCorr: item.maxSelfCorr ?? '',
+                                        failedNum: item.is?.failedNum ?? 0,
+                                        failedNumRA: item.is?.failedNumRA ?? 0,
+                                        failedNumPPA: item.is?.failedNumPPA ?? 0,
+                                        pyramidMultiplier: item.pyramidMultiplier ?? item.is?.pyramidMultiplier ?? null,
+                                        operatorCount: item.regular?.operatorCount ?? null,
+                                        type: item.type || item.settings?.type || null,
+                                        WQPPYS: item.is?.WQPPYS || '',
+                                    });
+                                }
+                            });
+                        }
+                        // 通知 alphaRowOverlay.js 数据已更新
+                        window.dispatchEvent(new CustomEvent('__wqp_alpha_checks_updated'));
+
                         // 构造新 Response 返回给前端
+                        // 显式复制 headers，避免引用原始 response 的 Headers 对象阻碍 GC
+                        const responseHeaders = new Headers();
+                        response.headers.forEach((value, key) => responseHeaders.set(key, value));
                         return new Response(JSON.stringify(modifiedData), {
                             status: response.status,
                             statusText: response.statusText,
-                            headers: response.headers
+                            headers: responseHeaders
                         });
                     } catch (e) {
                         console.error("修改响应提取失败：", e);

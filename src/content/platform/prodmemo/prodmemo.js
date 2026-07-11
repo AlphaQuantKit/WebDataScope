@@ -226,6 +226,16 @@
         window.postMessage({ type: 'WQP_PRODMEMO_CACHE_SYNCED', count: entries.length }, '*');
     }
 
+    // 防抖：合并短时间内多次 syncCacheToPage 调用，避免重复 get(null) + localStorage.setItem 造成内存峰值
+    let syncTimer = null;
+    function scheduleSyncCache(delay = 500) {
+        if (syncTimer) clearTimeout(syncTimer);
+        syncTimer = setTimeout(() => {
+            syncTimer = null;
+            syncCacheToPage().catch((error) => log('debounced cache sync failed', error));
+        }, delay);
+    }
+
     async function saveCorrelation(alphaId, type, data) {
         const normalizedId = normalizeAlphaId(alphaId);
         if (!normalizedId) return;
@@ -245,7 +255,8 @@
             },
         };
         await chrome.storage.local.set({ [key]: next });
-        await syncCacheToPage();
+        // 不再直接调 syncCacheToPage：chrome.storage.set 会触发 onChanged，
+        // 由 onChanged 统一触发防抖版 scheduleSyncCache，避免双重全量读取
         if (currentAlphaId === normalizedId || getCurrentAlphaIdFromUrl() === normalizedId) {
             scheduleRender(normalizedId);
         }
@@ -292,7 +303,8 @@
         if (namespace !== 'local') return;
         const hasProdMemoChange = Object.keys(changes).some((key) => key.startsWith(STORAGE_PREFIX));
         if (!hasProdMemoChange) return;
-        syncCacheToPage().catch((error) => log('cache sync failed', error));
+        // 防抖：短时间内多次 storage 变化合并为一次全量同步
+        scheduleSyncCache();
         if (currentAlphaId) scheduleRender(currentAlphaId);
     });
 
