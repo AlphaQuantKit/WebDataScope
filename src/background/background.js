@@ -345,11 +345,11 @@ function injectFetchInterceptor(tabId) {
                     ).length;
                     
                     item.is.failedNumPPA = item.is.checks.filter(check => 
-                        (PPA_CHECK_NAMES.includes(check.name) && check.result !== 'PASS' && check.result !== 'PENDING') || (check.name === "LOW_SHARPE" && check.value < 1)
+                        PPA_CHECK_NAMES.includes(check.name) && check.result !== 'PASS' && check.result !== 'PENDING'
                     ).length;
                     
-                    item.is.WQPPYS = item.is.checks
-                        .find(check => check.name === "MATCHES_PYRAMID")?.pyramids
+                    const pyramidCheck = item.is.checks.find(check => check.name === "MATCHES_PYRAMID");
+                    item.is.WQPPYS = pyramidCheck?.pyramids
                         ?.map(pyramid => (pyramid.name?.split('/').pop() || '').toLowerCase())
                         ?.join('/') || '';
                     // 从 MATCHES_PYRAMID check 提取 pyramid multiplier（顶层 multiplier 字段）

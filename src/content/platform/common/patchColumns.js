@@ -5,8 +5,7 @@
     // 这与油猴的效果完全等价。
 
     const SEARCH = 'kC.SUBMITTED?[l]:[c],...a?[d]:[],{';
-    const VERSION_REGEX = /version:\s*"1\.0\.6"/;
-    const VERSION_REPLACE = 'version:"1.0.6-wqp9"';
+
 
     const EXTRA_COLUMNS = [
         {
@@ -107,7 +106,6 @@
             let code = await (await fetch(src)).text();
             if (code.includes(SEARCH)) {
                 code = code.replace(SEARCH, buildReplacement());
-                code = code.replace('readOnly:!0,display:!0,', 'readOnly:!1,display:!0,');
                 console.log('[WQP] patchColumns: 成功注入列定义', src);
                 patched = true;
                 if (VERSION_REGEX.test(code)) {
