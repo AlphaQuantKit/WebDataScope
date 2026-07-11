@@ -339,6 +339,7 @@ function injectFetchInterceptor(tabId) {
                         item.is.failedNumPPA = 0;
                         return;
                     }
+                    item.is.failedNum = item.is.checks.filter(check => check.result === 'FAIL' || check.result === 'ERROR').length;
                     item.is.failedNumRA = item.is.checks.filter(check => 
                         RA_CHECK_NAMES.includes(check.name) && check.result !== 'PASS' && check.result !== 'PENDING'
                     ).length;

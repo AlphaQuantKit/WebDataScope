@@ -14,8 +14,16 @@
 
     function renderCheckBadge(el, checks) {
         // 仅依赖 failedNumRA + failedNumPPA，不再读 failedNum（WQ API 原始字段语义不一致）
-        const { failedNumRA = 0, failedNumPPA = 0 } = checks;
+        const { failedNum= 0, failedNumRA = 0, failedNumPPA = 0 } = checks;
         let symbol, bg, title;
+
+        // 处理 failedNum > 0 的情况
+        if(failedNum > 0) {
+            symbol = '✗'; bg = '#dc2626'; title = `${failedNum} FAIL`;
+            el.innerHTML = `<span style="display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;background:${bg};color:#fff;font-size:14px;font-weight:700;line-height:1;cursor:pointer;margin-top:8px;">${symbol}</span>`;
+            el.title = title;
+            return;
+        }
 
         if (failedNumRA === 0 && failedNumPPA === 0) {
             symbol = '✓'; bg = '#16a34a'; title = `RA PASS`;
