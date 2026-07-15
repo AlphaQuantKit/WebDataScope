@@ -7,7 +7,7 @@
 
     function prodCorrColor(val) {
         if (val === '-') return '';
-        if (val > 0.7) return '#b91c1c';
+        if (val >= 0.7) return '#b91c1c';
         if (val < 0.5) return '#b45309';
         return '#15803d';
     }

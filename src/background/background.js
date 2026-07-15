@@ -687,7 +687,11 @@ function broadcastRequest(rec) {
     // 仅向 platform.worldquantbrain.com 的标签分发
     chrome.tabs.query({ url: '*://platform.worldquantbrain.com/*' }, (tabs) => {
         for (const t of tabs) {
-            chrome.tabs.sendMessage(t.id, { type: 'REQ_MONITOR_NEW', data: rec });
+            // sendMessage 是 fire-and-forget：若目标 tab 无接收端（如尚未注入 content script）会抛
+            // "Could not establish connection. Receiving end does not exist."，吃掉错误避免污染 console
+            chrome.tabs.sendMessage(t.id, { type: 'REQ_MONITOR_NEW', data: rec }, () => {
+                void chrome.runtime.lastError;
+            });
         }
     });
 }
