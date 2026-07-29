@@ -51,7 +51,7 @@
         const wqppys = checks.WQPPYS || '-';
         const raw = checks.maxProdCorr;
         const prodCorrNum = raw !== null && raw !== undefined && raw !== '' ? Number(raw) : NaN;
-        const prodCorr = Number.isFinite(prodCorrNum) ? prodCorrNum.toFixed(2) : '-';
+        const prodCorr = Number.isFinite(prodCorrNum) ? (Math.trunc(prodCorrNum * 100) / 100).toString() : '-';
         const color = prodCorrColor(prodCorr);
         cell.innerHTML = `${wqppys} <span style="color:${color};font-weight:600;">${prodCorr}</span>`;
     }
