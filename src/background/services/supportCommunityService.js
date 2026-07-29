@@ -1,5 +1,7 @@
 ﻿import { getLocalValue, removeLocalValue, setLocalValue } from './storageService.js';
 
+import { getLlmConfig, runLlmText, saveLlmConfig } from './llmService.js';
+
 const API_BASE = 'https://api.worldquantbrain.com';
 const SUPPORT_BASE = 'https://support.worldquantbrain.com';
 const LIKED_IDS_KEY = 'WQP_LikedIds';
@@ -15,6 +17,7 @@ const POST_DETAIL_CONCURRENCY = 4;
 const RECENT_POST_CONCURRENCY = 3;
 const SECTION_CONCURRENCY = 2;
 const ARTICLE_CONCURRENCY = 3;
+const AI_SUMMARY_PROMPT_VERSION = 'markdown-summary-v1';
 
 let csrfToken = null;
 let supportReadyPromise = null;
@@ -1008,6 +1011,460 @@ async function fetchPostComments(postRef, ctx = {}) {
     };
 }
 
+function decodeBasicHtmlEntities(text) {
+    return String(text || '')
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&amp;/gi, '&')
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/gi, "'")
+        .replace(/&apos;/gi, "'")
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+        .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCharCode(parseInt(code, 16)));
+}
+
+function htmlToText(html) {
+    return decodeBasicHtmlEntities(String(html || '')
+        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/p>/gi, '\n')
+        .replace(/<\/li>/gi, '\n')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .replace(/[ \t]{2,}/g, ' ')
+        .trim());
+}
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function plainTextToHtml(value) {
+    const paragraphs = String(value || '')
+        .split(/\n{2,}/)
+        .map((part) => part.trim())
+        .filter(Boolean);
+    if (!paragraphs.length) return '';
+    return paragraphs.map((paragraph) => `<p>${escapeHtml(paragraph).replace(/\n/g, '<br>')}</p>`).join('');
+}
+
+function inlineMarkdownToHtml(value) {
+    return escapeHtml(value)
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*([^*]+)\*/g, '<em>$1</em>');
+}
+
+function markdownToHtml(value) {
+    const lines = String(value || '').replace(/\r\n/g, '\n').split('\n');
+    const blocks = [];
+    let paragraph = [];
+    let listItems = [];
+    let listOrdered = false;
+
+    const flushParagraph = () => {
+        if (!paragraph.length) return;
+        blocks.push(`<p>${paragraph.map(inlineMarkdownToHtml).join('<br>')}</p>`);
+        paragraph = [];
+    };
+    const flushList = () => {
+        if (!listItems.length) return;
+        const tag = listOrdered ? 'ol' : 'ul';
+        blocks.push(`<${tag}>${listItems.map((item) => `<li>${inlineMarkdownToHtml(item)}</li>`).join('')}</${tag}>`);
+        listItems = [];
+    };
+
+    lines.forEach((rawLine) => {
+        const line = rawLine.trim();
+        if (!line) {
+            flushParagraph();
+            flushList();
+            return;
+        }
+        const heading = line.match(/^(#{1,4})\s+(.+)$/);
+        if (heading) {
+            flushParagraph();
+            flushList();
+            const level = Math.min(4, heading[1].length + 1);
+            blocks.push(`<h${level}>${inlineMarkdownToHtml(heading[2])}</h${level}>`);
+            return;
+        }
+        const numbered = line.match(/^\d+[.)]\s+(.+)$/);
+        const bulleted = line.match(/^[-*+]\s+(.+)$/);
+        if (numbered || bulleted) {
+            flushParagraph();
+            const isOrdered = Boolean(numbered);
+            if (listItems.length && listOrdered !== isOrdered) flushList();
+            listOrdered = isOrdered;
+            listItems.push(numbered?.[1] || bulleted?.[1] || line);
+            return;
+        }
+        flushList();
+        paragraph.push(line);
+    });
+
+    flushParagraph();
+    flushList();
+    return blocks.join('') || plainTextToHtml(value);
+}
+
+function hashText(value) {
+    const text = String(value || '');
+    let hash = 2166136261;
+    for (let index = 0; index < text.length; index += 1) {
+        hash ^= text.charCodeAt(index);
+        hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+    }
+    return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function buildCommunityAiContextHash(context) {
+    return hashText([
+        context.post.id,
+        context.post.title || '',
+        context.post.text || '',
+        context.source.totalCommentCount,
+        ...context.comments.map((comment) => [
+            comment.id,
+            comment.text || '',
+        ].join(':')),
+    ].join('\n'));
+}
+
+async function fetchCommunityPostDetail(postRef, ctx = {}) {
+    const postId = parseApiId(postRef, 'posts', 'postId');
+    const data = await fetchZendeskJson(`/api/v2/community/posts/${encodeURIComponent(postId)}.json`, {}, ctx);
+    return normalizeCommunityPost(data?.post || { id: postId });
+}
+
+async function buildCommunityAiContext(payload = {}, ctx = {}) {
+    const postRef = payload.postUrl || payload.postId;
+    if (!postRef) throw new Error('postUrl or postId is required');
+    await ensureSupportReady(payload, ctx);
+
+    const post = await fetchCommunityPostDetail(postRef, ctx);
+    const detail = await fetchPostComments(post, ctx);
+    const mergedPost = {
+        ...post,
+        postContent: post.postContent || detail.postContent || '',
+    };
+    const comments = Object.values(detail.comments || {})
+        .sort((a, b) => {
+            const voteDiff = Number(b.voteNum || 0) - Number(a.voteNum || 0);
+            if (voteDiff !== 0) return voteDiff;
+            return String(a.commentTimeDatetime || '').localeCompare(String(b.commentTimeDatetime || ''));
+        })
+        .map((comment) => ({
+            id: comment.id,
+            author: comment.author,
+            createdAt: comment.createdAt || comment.commentTimeDatetime,
+            voteNum: comment.voteNum,
+            text: htmlToText(comment.commentContent),
+        }));
+
+    const source = {
+        postId: mergedPost.id,
+        postUrl: mergedPost.url || communityPostUrl(mergedPost.id),
+        title: mergedPost.title,
+        commentCount: comments.length,
+        totalCommentCount: commentsCount(detail.comments),
+        fetchedAt: new Date().toISOString(),
+    };
+    return {
+        source,
+        post: {
+            id: mergedPost.id,
+            title: mergedPost.title,
+            author: mergedPost.author,
+            createdAt: mergedPost.createdAt || mergedPost.datetime,
+            updatedAt: mergedPost.updatedAt,
+            voteNum: mergedPost.voteNum,
+            text: htmlToText(mergedPost.postContent),
+        },
+        comments,
+    };
+}
+
+function buildAiContextText(context) {
+    const commentsText = context.comments.map((comment, index) => [
+        `Comment ${index + 1} id=${comment.id} author=${comment.author || '-'} votes=${comment.voteNum || 0} created=${comment.createdAt || '-'}`,
+        comment.text || '',
+    ].join('\n')).join('\n\n');
+    return [
+        `Post id: ${context.post.id}`,
+        `Title: ${context.post.title}`,
+        `Author: ${context.post.author || '-'}`,
+        `Created: ${context.post.createdAt || '-'}`,
+        '',
+        'Post body:',
+        context.post.text || '(empty)',
+        '',
+        `Comments included: ${context.comments.length}/${context.source.totalCommentCount}`,
+        commentsText || '(no comments)',
+    ].join('\n');
+}
+
+async function saveCommunityAiPatch(postId, patch) {
+    const state = await getCommunityState();
+    const aiByPost = state.aiByPost && typeof state.aiByPost === 'object' ? state.aiByPost : {};
+    aiByPost[postId] = {
+        ...(aiByPost[postId] || {}),
+        ...patch,
+        updatedAt: new Date().toISOString(),
+    };
+    await saveCommunityStatePatch({ aiByPost });
+}
+
+export async function getCachedCommunityAiSummary(payload = {}) {
+    const postRef = payload.postUrl || payload.postId;
+    if (!postRef) throw new Error('postUrl or postId is required');
+    const postId = parseApiId(postRef, 'posts', 'postId');
+    const state = await getCommunityState();
+    const cachedSummary = state.aiByPost?.[postId]?.summary;
+    if (!cachedSummary) return null;
+    if (!cachedSummary.summaryMarkdown || cachedSummary.cache?.promptVersion !== AI_SUMMARY_PROMPT_VERSION) return null;
+    return {
+        ...cachedSummary,
+        cached: true,
+        cacheUnchecked: true,
+    };
+}
+
+export async function summarizeCommunityPostWithAi(payload = {}, ctx = {}) {
+    progress(ctx, 'Fetching post and comments for AI summary...');
+    const context = await buildCommunityAiContext(payload, ctx);
+    const contextHash = buildCommunityAiContextHash(context);
+    const llmConfig = await getLlmConfig();
+    const state = await getCommunityState();
+    const cachedSummary = state.aiByPost?.[context.source.postId]?.summary;
+    if (payload.forceRefresh !== true
+        && cachedSummary?.cache?.contextHash === contextHash
+        && cachedSummary?.cache?.model === llmConfig.model
+        && cachedSummary?.cache?.baseUrl === llmConfig.baseUrl
+        && cachedSummary?.cache?.promptVersion === AI_SUMMARY_PROMPT_VERSION
+        && cachedSummary?.summaryMarkdown) {
+        progress(ctx, `Using cached AI summary for ${context.source.postId}.`);
+        return {
+            ...cachedSummary,
+            cached: true,
+        };
+    }
+
+    progress(ctx, `Summarizing ${context.comments.length}/${context.source.totalCommentCount} comments with AI...`);
+
+    const { text, usage, model } = await runLlmText({
+        taskName: 'community summary',
+        systemPrompt: [
+            '你是一名专业的技术社区讨论总结师，擅长从帖子正文和长评论串中提炼结构化结论。',
+            '',
+            '你的任务是帮助读者快速理解：',
+            '1. 楼主在问什么；',
+            '2. 评论区提供了哪些有效信息；',
+            '3. 哪些内容已经形成共识或存在分歧；',
+            '4. 哪些问题仍缺少信息或尚未解决；',
+            '5. 后续回复可以从哪些已有信息切入。',
+            '',
+            '严格规则：',
+            '- 只能使用用户提供的帖子正文和评论内容。',
+            '- 不得引入外部事实、平台规则、个人经验、模型常识或上下文中未出现的指标。',
+            '- 不得编造事实、排名、alpha 表现、提交记录、官方政策、用户身份或操作结果。',
+            '- 必须区分事实、观点、建议和未验证内容。',
+            '- 没有上下文支撑的内容，不得写成结论，只能放入“仍未解决的问题”或“风险提醒”。',
+            '- 如果原文或评论中本身存在猜测，可以说明“评论中有人猜测/提到”，但不得将其当作事实。',
+            '',
+            '输出要求：',
+            '- 直接返回 Markdown 正文。',
+            '- 不添加“以下是总结”等前言。',
+            '- 使用简体中文。',
+            '- 表达要具体、克制、可扫描，避免空泛套话和重复内容。',
+        ].join('\n'),
+
+        userPrompt: [
+            '请基于下面提供的帖子正文和评论串，输出一份专业讨论总结。',
+            '',
+            '请使用以下 Markdown 结构：',
+            '',
+            '## 核心问题',
+            '- 概括楼主提出的问题。',
+            '- 补充楼主给出的背景、条件、约束或已尝试内容。',
+            '- 不要扩展原文没有提到的背景。',
+            '',
+            '## 评论区要点',
+            '- 总结评论区已经提供的有效信息。',
+            '- 区分共识、分歧、补充条件、操作建议和经验反馈。',
+            '- 如果某条评论只是猜测或未被确认，需要明确其不确定性。',
+            '',
+            '## 仍未解决的问题',
+            '- 列出当前上下文仍缺少的信息。',
+            '- 列出评论中没有确认、没有结论或需要楼主进一步补充的点。',
+            '- 不要把推测写成已解决。',
+            '',
+            '## 可回复角度',
+            '- 只基于已有帖子和评论，给出后续回复可以切入的方向。',
+            '- 可以包括：补充信息、澄清条件、回应评论分歧、追问关键变量、整理已有结论。',
+            '- 不要生成脱离上下文的新建议。',
+            '',
+            '## 风险提醒',
+            '- 标出上下文不足导致的潜在误读。',
+            '- 标出未验证猜测、指标解释风险、政策/官方口径风险。',
+            '- 如果没有明显风险，写“暂无明显风险，但仍应避免超出原文推断。”',
+            '',
+            '整体要求：',
+            '- 分段分条，重点明确。',
+            '- 每条尽量具体，不写泛泛而谈的空话。',
+            '- 不要重复同一信息。',
+            '- 不要输出原文复述式长摘要。',
+            '- 不要把没有证据的猜测写成事实。',
+            '',
+            buildAiContextText(context),
+        ].join('\n'),
+    });
+
+    const data = {
+        source: context.source,
+        summaryMarkdown: text,
+        usage,
+        model,
+        cached: false,
+        cache: {
+            contextHash,
+            baseUrl: llmConfig.baseUrl,
+            model: llmConfig.model,
+            promptVersion: AI_SUMMARY_PROMPT_VERSION,
+            savedAt: new Date().toISOString(),
+        },
+    };
+    await saveCommunityAiPatch(context.source.postId, { summary: data });
+    return data;
+}
+
+export async function draftCommunityPostCommentWithAi(payload = {}, ctx = {}) {
+    progress(ctx, 'Fetching post and comments for AI comment draft...');
+    const context = await buildCommunityAiContext(payload, ctx);
+    const customInstruction = String(payload.customInstruction || '').trim();
+
+    progress(ctx, 'Drafting AI comment...');
+    const { text, usage, model } = await runLlmText({
+        taskName: 'community comment draft',
+        systemPrompt: [
+            '你是一名专业的技术社区回复顾问，擅长根据帖子正文和评论上下文，起草克制、清晰、有帮助的中文社区评论。',
+            '',
+            '你的目标是参与讨论、补充信息、提出澄清问题或整理已有观点，而不是替官方下结论。',
+            '',
+            '信息边界：',
+            '- 只能使用用户提供的帖子正文、评论内容和用户额外指令。',
+            '- 用户额外指令只代表写作偏好、语气要求或回复方向，不自动构成事实依据。',
+            '- 不得引入外部事实、平台规则、官方政策、个人经历、模型常识或上下文中不存在的数据。',
+            '- 不得声称自己代表官方、管理员、平台、规则解释者或有内部信息。',
+            '- 不得编造个人 alpha 数据、排名、提交数量、Sharpe、Fitness、VF、回测结果、审核状态或任何未出现的指标。',
+            '',
+            '证据规则：',
+            '- 帖子或评论中明确出现的信息，可以作为回复依据。',
+            '- 评论区中的观点、经验或猜测，只能按“评论中提到/有人建议/可以先确认”的方式表达，不得写成事实。',
+            '- 上下文证据不足时，优先提出澄清问题、检查方向或谨慎补充，不要强行给结论。',
+            '- 不要使用“研究表明”“通常来说”“官方应该”“一定是”等缺乏上下文支撑的表达。',
+            '- 避免使用“可能”“应该会”“大概”“我觉得”等无依据表达；需要表达不确定性时，用“从目前信息看”“建议先确认”“还需要补充”这类克制表述。',
+            '',
+            '回复风格：',
+            '- 回复要像真实社区评论，简洁、自然、有针对性。',
+            '- 第一段必须承接楼主的具体问题，不要泛泛开场。',
+            '- 后续内容如有依据，给出 1-3 条具体细节、检查方向、补充问题或可执行建议。',
+            '- 多个要点使用编号列表或短横线列表；每条只表达一个重点。',
+            '- 避免空泛附和、过度寒暄、泛泛夸赞、免责声明、套话和填充内容。',
+            '- 不要写成长篇总结，不要复述整段帖子。',
+            '',
+            '输出要求：',
+            '- 直接返回可发布的 Markdown 评论正文。',
+            '- 不附加 reason、riskFlags、解释文字、标题或前言。',
+            '- 使用简体中文。',
+        ].join('\n'),
+
+        userPrompt: [
+            '请基于下面的帖子正文和评论串，起草一条适合直接发布的社区评论。',
+            '',
+            '写作要求：',
+            '- 先承接楼主的具体问题。',
+            '- 再基于已有上下文给出具体回复。',
+            '- 如果依据不足，只提出澄清问题、检查方向或谨慎补充。',
+            '- 如果包含多个细节，请使用 1. 2. 3. 或 - 列表。',
+            '- 控制篇幅，避免写成总结报告。',
+            '',
+            customInstruction
+                ? `用户额外指令：${customInstruction}\n注意：该指令只影响回复角度、语气或篇幅，不得作为事实依据。`
+                : '',
+            '',
+            buildAiContextText(context),
+        ].join('\n'),
+    });
+
+    const commentMarkdown = String(text || '').trim();
+    const data = {
+        source: context.source,
+        draft: {
+            commentMarkdown,
+            commentText: commentMarkdown,
+            commentHtml: markdownToHtml(commentMarkdown),
+        },
+        usage,
+        model,
+    };
+    await saveCommunityAiPatch(context.source.postId, { draft: data });
+    return data;
+}
+
+export async function createCommunityPostComment(payload = {}, ctx = {}) {
+    const postRef = payload.postUrl || payload.postId;
+    if (!postRef) throw new Error('postUrl or postId is required');
+    const postId = parseApiId(postRef, 'posts', 'postId');
+    const body = String(payload.commentHtml || markdownToHtml(payload.commentText || '')).trim();
+    if (!body) throw new Error('comment body is required');
+
+    await ensureSupportReady(payload, ctx);
+    const token = await getCsrfToken(ctx);
+    progress(ctx, `Posting comment to ${postId}...`);
+    const response = await fetch(`${SUPPORT_BASE}/api/v2/community/posts/${encodeURIComponent(postId)}/comments.json`, withCredentials({
+        method: 'POST',
+        headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': token,
+            'X-Requested-With': 'XMLHttpRequest',
+        },
+        body: JSON.stringify({
+            comment: {
+                body,
+            },
+        }),
+    }));
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        const detail = data?.error || data?.description || data?.message || response.statusText;
+        throw new Error(`Comment post failed (${response.status}): ${detail}`);
+    }
+
+    const comment = normalizePostComment(data?.comment || data, postId);
+    await saveCommunityAiPatch(postId, {
+        lastPostedComment: {
+            comment,
+            body,
+            postedAt: new Date().toISOString(),
+        },
+    });
+    return {
+        postId,
+        comment,
+        response: data,
+    };
+}
+
 async function getLikedIds() {
     const ids = await getLocalValue(LIKED_IDS_KEY);
     return Array.isArray(ids) ? ids : [];
@@ -1834,6 +2291,18 @@ export async function runCommunityAction(action, payload = {}, ctx = {}) {
             return crawlCategoryFullAll(payload, ctx);
         case 'CLEAR_LIKED_IDS':
             return clearLikedIds();
+        case 'LLM_CONFIG_GET':
+            return getLlmConfig();
+        case 'LLM_CONFIG_SAVE':
+            return saveLlmConfig(payload.config);
+        case 'AI_SUMMARIZE_POST':
+            return summarizeCommunityPostWithAi(payload, ctx);
+        case 'AI_GET_CACHED_SUMMARY':
+            return getCachedCommunityAiSummary(payload);
+        case 'AI_DRAFT_COMMENT':
+            return draftCommunityPostCommentWithAi(payload, ctx);
+        case 'AI_POST_COMMENT':
+            return createCommunityPostComment(payload, ctx);
         default:
             throw new Error(`Unsupported community action: ${action}`);
     }

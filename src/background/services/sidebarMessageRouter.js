@@ -62,6 +62,40 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === 'WQP_PRODMEMO_DELETE') {
         return respond(sendResponse, deleteProdMemoCache(msg.alphaId));
     }
+    if (msg.type === 'WQP_LLM_CONFIG_GET') {
+        return respond(sendResponse, runCommunityAction('LLM_CONFIG_GET'));
+    }
+    if (msg.type === 'WQP_LLM_CONFIG_SAVE') {
+        return respond(sendResponse, runCommunityAction('LLM_CONFIG_SAVE', { config: msg.config }));
+    }
+    if (msg.type === 'WQP_COMMUNITY_AI_SUMMARIZE_POST') {
+        return respond(sendResponse, runCommunityAction('AI_SUMMARIZE_POST', {
+            postUrl: msg.postUrl,
+            postId: msg.postId,
+            forceRefresh: msg.forceRefresh,
+        }));
+    }
+    if (msg.type === 'WQP_COMMUNITY_AI_GET_CACHED_SUMMARY') {
+        return respond(sendResponse, runCommunityAction('AI_GET_CACHED_SUMMARY', {
+            postUrl: msg.postUrl,
+            postId: msg.postId,
+        }));
+    }
+    if (msg.type === 'WQP_COMMUNITY_AI_DRAFT_COMMENT') {
+        return respond(sendResponse, runCommunityAction('AI_DRAFT_COMMENT', {
+            postUrl: msg.postUrl,
+            postId: msg.postId,
+            customInstruction: msg.customInstruction,
+        }));
+    }
+    if (msg.type === 'WQP_COMMUNITY_AI_POST_COMMENT') {
+        return respond(sendResponse, runCommunityAction('AI_POST_COMMENT', {
+            postUrl: msg.postUrl,
+            postId: msg.postId,
+            commentText: msg.commentText,
+            commentHtml: msg.commentHtml,
+        }));
+    }
 
     return false;
 });
