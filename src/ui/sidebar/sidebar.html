@@ -49,6 +49,24 @@
                     <input id="geniusAlphaCount" type="number" min="0" step="1" required>
                 </label>
 
+                <div class="section-title">AI Forum Assistant</div>
+                <label class="check-row">
+                    <input id="llmEnabled" type="checkbox">
+                    <span>启用 AI 总结和评论</span>
+                </label>
+                <label class="field">
+                    <span>Base URL</span>
+                    <input id="llmBaseUrl" type="url" placeholder="https://api.deepseek.com 或 https://api.moonshot.cn/v1">
+                </label>
+                <label class="field">
+                    <span>Model</span>
+                    <input id="llmModel" type="text" placeholder="输入模型名称">
+                </label>
+                <label class="field">
+                    <span>API Key</span>
+                    <input id="llmApiKey" type="password" autocomplete="off" placeholder="留空则保留已保存 Key">
+                </label>
+
                 <button id="saveSettingsBtn" class="primary" type="submit">保存设置</button>
             </form>
             <div class="section-title">Data 文件</div>
