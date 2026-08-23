@@ -1,11 +1,13 @@
 import {
     PROD_MEMO_ALGORITHM_VERSION,
+    alphaCorrelationGroupKey,
     alphaGroupKey,
     calculationFingerprint,
     calculateLocalCorrelation,
     calculateProdLowerBound,
     pnlFingerprint,
     selectCandidateAlphas,
+    trimPnlToRecentYears,
 } from './prodMemoCalculator.js';
 import {
     PROD_MEMO_STORES,
@@ -15,15 +17,20 @@ import {
     getProdMemoLightSnapshot,
     getRecord,
     getRecords,
+    getSharedSnapshotMetadata,
     markSubmittedSnapshot,
     putRecord,
     putRecords,
+    replaceSharedSnapshot,
 } from './prodMemoDb.js';
 
 const LEGACY_PREFIX = 'WQP_ProdMemo_';
 const LEGACY_MIGRATION_KEY = 'WQP_ProdMemo_IndexedDB_Migration_v1';
 const REVISION_KEY = 'WQP_ProdMemo_DB_Revision';
 const SYNC_META_KEY = 'submitted';
+const LAST_SHARE_UPLOAD_KEY = 'WQP_PNL_SHARE_LAST_UPLOAD';
+// Keep shared PnL aligned with the local Corr calculation window.
+const SHARE_PNL_YEARS = 4;
 
 let migrationPromise = null;
 
@@ -70,6 +77,103 @@ function finiteNumber(value) {
     if (value === null || value === undefined || value === '') return null;
     const number = Number(value);
     return Number.isFinite(number) ? number : null;
+}
+
+function localDateKey(value = Date.now()) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    const parts = new Intl.DateTimeFormat('en-CA', {
+        year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(date);
+    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    return `${values.year}-${values.month}-${values.day}`;
+}
+
+function submittedDateKey(value) {
+    if (!value) return '';
+    if (typeof value === 'string') {
+        const dateOnly = value.trim().match(/^(\d{4}-\d{2}-\d{2})(?:$|T)/);
+        if (dateOnly) return dateOnly[1];
+    }
+    const timestamp = typeof value === 'number' ? value : Date.parse(String(value));
+    return Number.isFinite(timestamp) ? localDateKey(timestamp) : '';
+}
+
+export function normalizeShareClassifications(value) {
+    return (Array.isArray(value) ? value : []).map((item) => {
+        if (typeof item === 'string') return { id: item, name: item };
+        if (!item || typeof item !== 'object' || !item.id) return null;
+        return {
+            id: String(item.id).trim(),
+            name: item.name == null || String(item.name).trim() === ''
+                ? String(item.id).trim()
+                : String(item.name).trim(),
+        };
+    }).filter((item) => item?.id);
+}
+
+export function evaluateShareUploadEligibility({
+    sync,
+    submittedAlphas = [],
+    pnlIds = [],
+    accountWqId = '',
+    lastUpload = null,
+}) {
+    const submitted = submittedAlphas.filter((alpha) => (
+        alpha?.submitted
+        && alpha.source === 'wq-sync'
+        && (!accountWqId || alpha.accountWqId === accountWqId)
+    ));
+    const pnlIdSet = new Set(pnlIds);
+    const submittedPnlCount = submitted.filter((alpha) => pnlIdSet.has(alpha.id)).length;
+    const failedIds = Array.isArray(sync?.failedIds) ? sync.failedIds : [];
+    const backfillFailedIds = Array.isArray(sync?.backfillFailedIds) ? sync.backfillFailedIds : [];
+    const countsComplete = sync?.mode === 'incremental'
+        && sync?.status === 'completed'
+        && sync?.fullCompleted === true
+        && Number(sync.remoteCount) === submitted.length
+        && Number(sync.alphaCount) === submitted.length
+        && Number(sync.submittedPnlCount) === submitted.length
+        && submittedPnlCount === submitted.length
+        && failedIds.length === 0
+        && backfillFailedIds.length === 0;
+    const latestSubmitted = submitted.reduce((latest, alpha) => {
+        const raw = String(alpha.dateSubmitted || '').trim();
+        const timestamp = Date.parse(raw);
+        return Number.isFinite(timestamp) && timestamp > latest.timestamp
+            ? { timestamp, raw }
+            : latest;
+    }, { timestamp: 0, raw: '' });
+    const latestSubmittedDate = latestSubmitted.timestamp ? submittedDateKey(latestSubmitted.raw) : '';
+    const syncAfterLastUpload = !Number(lastUpload?.syncAt)
+        || Number(sync?.incrementalSyncedAt) > Number(lastUpload.syncAt);
+    const countDetails = [
+        `mode=${sync?.mode || '无'}`,
+        `status=${sync?.status || '无'}`,
+        `fullCompleted=${sync?.fullCompleted === true}`,
+        `remote=${Number(sync?.remoteCount || 0)}`,
+        `可上传Alpha=${submitted.length}`,
+        `syncAlpha=${Number(sync?.alphaCount || 0)}`,
+        `syncPnL=${Number(sync?.submittedPnlCount || 0)}`,
+        `可上传PnL=${submittedPnlCount}`,
+        `PnL失败=${failedIds.length}`,
+        `回填失败=${backfillFailedIds.length}`,
+    ].join('，');
+    return {
+        eligible: countsComplete && syncAfterLastUpload,
+        countsComplete,
+        syncAfterLastUpload,
+        latestSubmittedDate,
+        submitted,
+        submittedPnlCount,
+        failedIds,
+        backfillFailedIds,
+        reason: !countsComplete
+            ? `请先完成完整的增量同步（Alpha 与 Submitted PnL 数量必须一致且无失败；${countDetails}）。`
+            : !syncAfterLastUpload
+                ? '本次增量同步没有晚于上次成功上传，请先完成新的增量同步。'
+                : '',
+    };
 }
 
 function extractCorrelationValues(data) {
@@ -123,7 +227,7 @@ function normalizePlatformStat(value, defaultUpdated = Date.now(), source = 'pla
     };
 }
 
-function normalizeAlpha(alpha, submitted = true) {
+function normalizeAlpha(alpha, submitted = true, accountWqId = '') {
     if (!alpha?.id) return null;
     const settings = alpha.settings || {};
     const isStats = alpha.is || {};
@@ -151,6 +255,8 @@ function normalizeAlpha(alpha, submitted = true) {
             margin: isStats.margin ?? null,
         },
         submitted: submitted && alpha.status !== 'UNSUBMITTED' && Boolean(alpha.dateSubmitted),
+        source: accountWqId ? 'wq-sync' : 'platform-refresh',
+        accountWqId,
         syncedAt: Date.now(),
     };
     normalized.groupKey = alphaGroupKey(normalized);
@@ -230,14 +336,14 @@ function snapshotMaps(snapshot) {
     };
 }
 
-function buildCalculationContext(snapshot, alphaId, corrType, maps = snapshotMaps(snapshot)) {
+export function buildCalculationContext(snapshot, alphaId, corrType, maps = snapshotMaps(snapshot)) {
     const targetAlpha = maps.alphaById.get(alphaId);
     const targetPnl = maps.pnlById.get(alphaId);
     if (!targetAlpha || !targetPnl) return { maps, targetAlpha, targetPnl, candidates: [], references: [] };
     const candidates = corrType === 'PROD_LOWER_BOUND'
         ? []
         : selectCandidateAlphas(snapshot.alphas, maps.pnlById, targetAlpha, corrType);
-    const targetGroup = alphaGroupKey(targetAlpha);
+    const targetGroup = alphaCorrelationGroupKey(targetAlpha);
     const references = corrType === 'PROD_LOWER_BOUND'
         ? snapshot.platformCorrs.map((platform) => {
             const alpha = maps.alphaById.get(platform.alphaId);
@@ -248,7 +354,7 @@ function buildCalculationContext(snapshot, alphaId, corrType, maps = snapshotMap
             };
         }).filter((reference) => (
             reference.alpha?.id
-            && alphaGroupKey(reference.alpha) === targetGroup
+            && alphaCorrelationGroupKey(reference.alpha) === targetGroup
             && reference.platformProdMax !== null
             && maps.pnlById.has(reference.alpha.id)
         ))
@@ -341,7 +447,10 @@ function publicAlphaRecord(alpha) {
 
 async function buildResolvedEntries(alphaIds = null) {
     await ensureLegacyMigration();
-    const snapshot = await getProdMemoLightSnapshot();
+    // The list view only needs PnL fingerprints to determine whether local
+    // Corr records are stale. Loading every PnL point here blocks the sidebar
+    // for large accounts; full PnL is loaded only when a calculation runs.
+    const snapshot = await getCalculationSnapshot({ fullPnl: false });
     const maps = snapshotMaps(snapshot);
     const requested = alphaIds ? new Set(alphaIds.map(normalizeAlphaId)) : null;
     const ids = new Set([
@@ -386,7 +495,9 @@ async function buildResolvedEntries(alphaIds = null) {
 export async function saveSubmittedAlphaBatch(alphas, submitted = true, options = {}) {
     await ensureLegacyMigration();
     const existing = new Map((await getAllRecords(PROD_MEMO_STORES.alphas)).map((record) => [record.id, record]));
-    const records = (alphas || []).map((alpha) => normalizeAlpha(alpha, submitted)).filter(Boolean).map((record) => ({
+    const records = (alphas || []).map((alpha) => (
+        normalizeAlpha(alpha, submitted, String(options.accountWqId || '').trim())
+    )).filter(Boolean).map((record) => ({
         ...record,
         submitted: existing.get(record.id)?.submitted || record.submitted,
         noLongerSubmitted: false,
@@ -401,13 +512,39 @@ export async function saveAlphaPnl(alphaId, data, options = {}) {
     const normalizedId = normalizeAlphaId(alphaId);
     if (!normalizedId || !Array.isArray(data?.records)) throw new Error('PnL 数据无效。');
     const fingerprint = pnlFingerprint(data);
+    const accountWqId = String(options.accountWqId || '').trim();
     const existing = await getRecord(PROD_MEMO_STORES.pnls, normalizedId);
     if (existing?.fingerprint === fingerprint) {
-        return { saved: data.records.length, fingerprint, unchanged: true };
+        // A same-content PnL can still be a fresh verification from the
+        // current WQ session. Older records were stored without ownership
+        // metadata, so returning early here left them ineligible for upload
+        // forever even after a successful re-fetch.
+        const metadataChanged = Boolean(accountWqId)
+            && (existing.source !== 'wq-sync' || existing.accountWqId !== accountWqId);
+        if (!metadataChanged) {
+            return { saved: data.records.length, fingerprint, unchanged: true };
+        }
+        const refreshed = {
+            ...existing,
+            source: 'wq-sync',
+            accountWqId,
+            fetchedAt: Date.now(),
+            fingerprint,
+        };
+        await putRecord(PROD_MEMO_STORES.pnls, refreshed);
+        if (options.bump !== false) await bumpRevision('pnl');
+        return {
+            saved: data.records.length,
+            fingerprint,
+            unchanged: true,
+            metadataUpdated: true,
+        };
     }
     const record = {
         ...data,
         alphaId: normalizedId,
+        source: accountWqId ? 'wq-sync' : 'platform-refresh',
+        accountWqId,
         fetchedAt: Date.now(),
         fingerprint,
     };
@@ -427,7 +564,7 @@ export async function calculateLocalCorrs(alphaId) {
     await ensureLegacyMigration();
     const normalizedId = normalizeAlphaId(alphaId);
     const corrTypes = ['SELF', 'POOL', 'PROD_LOWER_BOUND'];
-    const lightSnapshot = await getProdMemoLightSnapshot();
+    const lightSnapshot = await getCalculationSnapshot({ fullPnl: false });
     const lightMaps = snapshotMaps(lightSnapshot);
     if (!lightMaps.alphaById.has(normalizedId)) throw new Error(`缺少目标 Alpha 元数据：${normalizedId}`);
     if (!lightMaps.pnlById.has(normalizedId)) throw new Error(`缺少目标 Alpha PnL：${normalizedId}`);
@@ -460,7 +597,15 @@ export async function calculateLocalCorrs(alphaId) {
         context.candidates.forEach((alpha) => requiredPnlIds.add(alpha.id));
         context.references.forEach((reference) => requiredPnlIds.add(reference.alpha.id));
     });
-    const pnls = await getRecords(PROD_MEMO_STORES.pnls, [...requiredPnlIds]);
+    const requiredIds = [...requiredPnlIds];
+    const [personalPnls, sharedRecords] = await Promise.all([
+        getRecords(PROD_MEMO_STORES.pnls, requiredIds),
+        getRecords(PROD_MEMO_STORES.sharedRecords, requiredIds),
+    ]);
+    const pnls = [
+        ...personalPnls,
+        ...sharedRecordsToCalculationPnls(sharedRecords),
+    ];
     const snapshot = { ...lightSnapshot, pnls };
     const maps = snapshotMaps(snapshot);
     const changedRecords = [];
@@ -499,7 +644,7 @@ export async function calculateLocalCorrs(alphaId) {
         const record = {
             alphaId: normalizedId,
             corrType,
-            groupKey: alphaGroupKey(context.targetAlpha),
+            groupKey: alphaCorrelationGroupKey(context.targetAlpha),
             result,
             calculatedAt: Date.now(),
             algorithmVersion: PROD_MEMO_ALGORITHM_VERSION,
@@ -576,6 +721,171 @@ export async function getProdMemoStats() {
     return statsFromSnapshot(await getProdMemoLightSnapshot());
 }
 
+export async function getShareUploadSnapshot() {
+    await ensureLegacyMigration();
+    const snapshot = await getProdMemoLightSnapshot();
+    const pnlRecords = await getAllRecords(PROD_MEMO_STORES.pnls);
+    const lastUpload = (await chromeGet(LAST_SHARE_UPLOAD_KEY))[LAST_SHARE_UPLOAD_KEY] || null;
+    const sync = snapshot.syncMeta.find((record) => record.key === SYNC_META_KEY) || null;
+    const accountWqId = String(sync?.accountWqId || '').trim();
+    const pnlById = new Map(pnlRecords
+        .filter((record) => record.source === 'wq-sync' && record.accountWqId === accountWqId)
+        .map((record) => [record.alphaId, record]));
+    const eligibility = evaluateShareUploadEligibility({
+        sync,
+        submittedAlphas: snapshot.alphas,
+        pnlIds: [...pnlById.keys()],
+        accountWqId,
+        lastUpload,
+    });
+    const submitted = eligibility.submitted;
+    const { latestSubmittedDate, failedIds, backfillFailedIds } = eligibility;
+
+    const records = [];
+    const seen = new Set();
+    for (const alpha of submitted) {
+        const pnl = pnlById.get(alpha.id);
+        const normalizedPnl = trimPnlToRecentYears(pnl, SHARE_PNL_YEARS);
+        if (!alpha.groupKey || !normalizedPnl.length) continue;
+        records.push({
+            alphaId: alpha.id,
+            sourceType: 'submitted',
+            groupKey: alpha.groupKey,
+            prodCorr: 1,
+            classifications: normalizeShareClassifications(alpha.classifications),
+            pnl: { records: normalizedPnl },
+        });
+        seen.add(alpha.id);
+    }
+
+    for (const platform of snapshot.platformCorrs) {
+        const alpha = snapshot.alphas.find((item) => item.id === platform.alphaId);
+        const pnl = pnlById.get(platform.alphaId);
+        const prodCorr = finiteNumber(platform.prod?.max);
+        const normalizedPnl = trimPnlToRecentYears(pnl, SHARE_PNL_YEARS);
+        if (seen.has(platform.alphaId) || !alpha?.groupKey || prodCorr === null || !normalizedPnl.length) continue;
+        records.push({
+            alphaId: alpha.id,
+            sourceType: 'prod',
+            groupKey: alpha.groupKey,
+            prodCorr,
+            classifications: normalizeShareClassifications(alpha.classifications),
+            pnl: { records: normalizedPnl },
+        });
+        seen.add(alpha.id);
+    }
+
+    const accountMatched = Boolean(sync?.accountWqId);
+    const eligible = Boolean(eligibility.eligible && accountMatched && records.length >= submitted.length);
+    return {
+        eligible,
+        reason: eligibility.reason || (!accountMatched
+            ? '本次增量同步没有记录当前 WQ ID，请重新同步后再上传。'
+            : records.length < submitted.length
+                    ? '存在缺少 groupKey 或 PnL 的 Alpha，无法上传完整快照。'
+                    : ''),
+        records,
+        manifest: {
+            mode: sync?.mode || '',
+            status: sync?.status || '',
+            remoteCount: Number(sync?.remoteCount || 0),
+            alphaCount: submitted.length,
+            submittedPnlCount: Number(sync?.submittedPnlCount || 0),
+            submittedDate: latestSubmittedDate,
+            incrementalSyncedAt: Number(sync?.incrementalSyncedAt || 0),
+            accountWqId: sync?.accountWqId || '',
+            failedIds,
+            backfillFailedIds,
+        },
+    };
+}
+
+async function getCalculationSnapshot({ fullPnl = true } = {}) {
+    const base = await getProdMemoLightSnapshot();
+    const personalPnlRecords = fullPnl
+        ? getAllRecords(PROD_MEMO_STORES.pnls)
+        : (base.pnlFingerprints || []).map((record) => ({
+            alphaId: record.alphaId,
+            fingerprint: record.fingerprint || '',
+        }));
+    const [personalPnls, sharedRecords] = await Promise.all([
+        Promise.resolve(personalPnlRecords),
+        getSharedSnapshotRecords({ fullPnl }),
+    ]);
+    const sharedAlphas = sharedRecords.map((record) => {
+        const [region = '', universe = '', rawDelay = 'D1'] = String(record.groupKey || '').split('|');
+        const delay = Number(String(rawDelay).replace(/^D/i, ''));
+        return {
+        id: record.alias,
+        name: record.alias,
+        groupKey: record.groupKey,
+        settings: { region, universe, delay },
+        classifications: record.classifications || [],
+        submitted: false,
+        shared: true,
+        source: 'shared',
+        };
+    });
+    const sharedPlatforms = sharedRecords.map((record) => ({
+        alphaId: record.alias,
+        prod: {
+            max: finiteNumber(record.prodCorr),
+            min: finiteNumber(record.prodCorr),
+            updated: record.updatedAt,
+            source: 'shared',
+        },
+        updatedAt: record.updatedAt,
+        shared: true,
+    }));
+    const sharedPnls = sharedRecordsToCalculationPnls(sharedRecords);
+    return {
+        ...base,
+        alphas: [...base.alphas, ...sharedAlphas],
+        pnls: [...personalPnls, ...sharedPnls],
+        pnlIds: [...base.pnlIds, ...sharedPnls.map((record) => record.alphaId)],
+        platformCorrs: [...base.platformCorrs, ...sharedPlatforms],
+    };
+}
+
+export function sharedRecordsToCalculationPnls(records) {
+    return (records || []).map((record) => ({
+        alphaId: record.alias,
+        records: Array.isArray(record.pnl?.records) ? record.pnl.records : [],
+        fingerprint: record.fingerprint || '',
+        source: 'shared',
+    }));
+}
+
+export async function getSharedSnapshotMeta() {
+    return getRecord(PROD_MEMO_STORES.sharedMeta, 'active');
+}
+
+export async function getSharedSnapshotRecords({ fullPnl = true } = {}) {
+    if (!fullPnl) {
+        const metadata = await getSharedSnapshotMetadata();
+        if (metadata.every((record) => record.fingerprint)) {
+            return metadata.map((record) => ({ ...record, pnl: { records: [] } }));
+        }
+    }
+    const records = await getAllRecords(PROD_MEMO_STORES.sharedRecords);
+    if (fullPnl) return records;
+    return records.map((record) => ({
+        ...record,
+        pnl: { records: [] },
+        fingerprint: record.fingerprint || pnlFingerprint(record.pnl),
+    }));
+}
+
+export async function saveSharedSnapshot(records, meta = {}) {
+    const normalized = (records || []).filter((record) => (
+        record && typeof record.alias === 'string' && Array.isArray(record.pnl?.records)
+    )).map((record) => ({
+        ...record,
+        fingerprint: record.fingerprint || pnlFingerprint(record.pnl),
+    }));
+    return replaceSharedSnapshot(normalized, meta);
+}
+
 export async function getProdMemoCache() {
     const { snapshot, entries } = await buildResolvedEntries();
     return {
@@ -585,15 +895,30 @@ export async function getProdMemoCache() {
     };
 }
 
-export async function getIncrementalSyncState() {
+export async function getIncrementalSyncState(accountWqId = '') {
     await ensureLegacyMigration();
     const snapshot = await getProdMemoLightSnapshot();
-    const pnlIds = new Set(snapshot.pnlIds);
-    const alphaIds = snapshot.alphas.filter((alpha) => alpha.submitted).map((alpha) => alpha.id);
+    const owner = String(accountWqId || '').trim();
+    const pnlRecords = await getAllRecords(PROD_MEMO_STORES.pnls);
+    const pnlIds = new Set(pnlRecords.filter((record) => (
+        record.source === 'wq-sync' && owner && record.accountWqId === owner
+    )).map((record) => record.alphaId));
+    const alphaIds = snapshot.alphas.filter((alpha) => (
+        alpha.submitted
+        && alpha.source === 'wq-sync'
+        && owner
+        && alpha.accountWqId === owner
+        && alpha.groupKey
+    )).map((alpha) => alpha.id);
     const platformProdIds = snapshot.platformCorrs
         .filter((record) => finiteNumber(record.prod?.max) !== null)
         .map((record) => record.alphaId);
-    const alphaIdsAll = new Set(snapshot.alphas.map((record) => record.id));
+    const alphaIdsAll = new Set(snapshot.alphas.filter((record) => (
+        record.source === 'wq-sync'
+        && owner
+        && record.accountWqId === owner
+        && record.groupKey
+    )).map((record) => record.id));
     return {
         alphaIds,
         missingPnlIds: alphaIds.filter((alphaId) => !pnlIds.has(alphaId)),
@@ -722,19 +1047,33 @@ export async function deleteProdMemoCache(alphaId) {
 export async function runProdMemoAction(action, payload = {}) {
     switch (action) {
         case 'SAVE_ALPHA_BATCH':
-            return saveSubmittedAlphaBatch(payload.alphas || [], payload.submitted !== false, { bump: !payload.silent });
+            return saveSubmittedAlphaBatch(payload.alphas || [], payload.submitted !== false, {
+                bump: !payload.silent,
+                accountWqId: payload.accountWqId,
+            });
         case 'SAVE_PNL':
-            return saveAlphaPnl(payload.alphaId, payload.data, { bump: !payload.silent });
+            return saveAlphaPnl(payload.alphaId, payload.data, {
+                bump: !payload.silent,
+                accountWqId: payload.accountWqId,
+            });
         case 'SAVE_PLATFORM_CORR':
             return savePlatformCorrelation(payload.alphaId, payload.corrType, payload.data);
         case 'RECONCILE_ALPHAS':
             return reconcileSubmittedAlphas(payload.alphaIds || []);
         case 'GET_SYNC_STATE':
-            return getIncrementalSyncState();
+            return getIncrementalSyncState(payload.accountWqId);
         case 'SET_SYNC_META':
             return setProdMemoSyncMeta(payload.patch || {});
         case 'GET_STATS':
             return getProdMemoStats();
+        case 'GET_SHARE_UPLOAD_SNAPSHOT':
+            return getShareUploadSnapshot();
+        case 'GET_SHARED_SNAPSHOT_META':
+            return getSharedSnapshotMeta();
+        case 'GET_SHARED_SNAPSHOT_RECORDS':
+            return getSharedSnapshotRecords();
+        case 'SAVE_SHARED_SNAPSHOT':
+            return saveSharedSnapshot(payload.records || [], payload.meta || {});
         case 'GET_DETAIL':
             return getProdMemoDetail(payload.alphaId);
         case 'GET_RESOLVED_CACHE':

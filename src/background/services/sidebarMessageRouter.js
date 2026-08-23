@@ -25,6 +25,7 @@ import {
     triggerAutoLogin,
 } from './sessionKeeperService.js';
 import { runCommunityAction } from './supportCommunityService.js';
+import { downloadSharedData, getShareStatus, uploadSharedData } from './pnlShareService.js';
 
 function respond(sendResponse, promise) {
     promise
@@ -41,6 +42,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
     if (msg.type === 'WQP_SETTINGS_SAVE') {
         return respond(sendResponse, saveSettings(msg.settings));
+    }
+    if (msg.type === 'WQP_PNL_SHARE_STATUS') {
+        return respond(sendResponse, getShareStatus());
+    }
+    if (msg.type === 'WQP_PNL_SHARE_UPLOAD') {
+        return respond(sendResponse, uploadSharedData());
+    }
+    if (msg.type === 'WQP_PNL_SHARE_DOWNLOAD') {
+        return respond(sendResponse, downloadSharedData());
     }
     if (msg.type === 'WQP_SESSION_GET') {
         return respond(sendResponse, getSessionKeeperState());

@@ -1,0 +1,21 @@
+{
+  "name": "webdatascope-pnl-share-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:e2e": "node test/local-e2e.mjs",
+    "test:staging-load": "node test/staging-load.mjs",
+    "check": "wrangler deploy --dry-run --env=\"\"",
+    "types": "wrangler types",
+    "secrets:generate": "node scripts/generate-secrets.mjs",
+    "dev": "wrangler dev --local --port 8789",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:staging": "wrangler d1 migrations apply DB --env staging --remote",
+    "db:migrate:production": "wrangler d1 migrations apply DB --remote"
+  },
+  "devDependencies": {
+    "wrangler": "^4.36.0"
+  }
+}

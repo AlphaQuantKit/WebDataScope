@@ -5,6 +5,7 @@ export const DEFAULT_SETTINGS = {
     geniusAlphaCount: 40,
     geniusCombineTag: true,
     apiMonitorEnabled: true,
+    pnlShareEnabled: false,
 };
 
 function pickSettings(settings) {
@@ -14,6 +15,7 @@ function pickSettings(settings) {
         'geniusAlphaCount',
         'geniusCombineTag',
         'apiMonitorEnabled',
+        'pnlShareEnabled',
     ];
     return keys.reduce((picked, key) => {
         if (settings[key] !== undefined) picked[key] = settings[key];
@@ -34,6 +36,7 @@ export async function saveSettings(settings) {
         geniusAlphaCount: parseInt(settings?.geniusAlphaCount, 10) || DEFAULT_SETTINGS.geniusAlphaCount,
         geniusCombineTag: settings?.geniusCombineTag === true,
         apiMonitorEnabled: settings?.apiMonitorEnabled === true,
+        pnlShareEnabled: settings?.pnlShareEnabled === true,
     };
 
     await setLocalValue('WQP_Settings', normalized);

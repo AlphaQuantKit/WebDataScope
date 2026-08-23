@@ -27,6 +27,13 @@ test('full Alpha sync retries the same page and crosses the 1,000 limit with a t
 
     async function nativeFetch(url, options = {}) {
         const rawUrl = String(url);
+        if (rawUrl.includes('/users/self/consultant/summary')) {
+            return {
+                ok: true,
+                status: 200,
+                json: async () => ({ leaderboard: { user: 'test-owner' } }),
+            };
+        }
         if (rawUrl.includes('/users/self/alphas?')) {
             alphaUrls.push(rawUrl);
             const parsed = new URL(rawUrl);
@@ -152,6 +159,13 @@ async function runIncrementalProbeScenario({
     async function nativeFetch(url) {
         const rawUrl = String(url);
         fetchUrls.push(rawUrl);
+        if (rawUrl.includes('/users/self/consultant/summary')) {
+            return {
+                ok: true,
+                status: 200,
+                json: async () => ({ leaderboard: { user: 'test-owner' } }),
+            };
+        }
         if (rawUrl.includes('/users/self/alphas?')) {
             const parsed = new URL(rawUrl);
             const offset = Number(parsed.searchParams.get('offset'));
@@ -273,4 +287,7 @@ test('incremental probe fetches only the missing Alpha and then its missing PnL'
     );
     assert.equal(result.completedResult.alphaAction, 'incremental');
     assert.equal(result.completedResult.pnlRequested, 1);
+    assert.ok(result.actions.filter((item) => (
+        ['GET_SYNC_STATE', 'SAVE_ALPHA_BATCH', 'SAVE_PNL'].includes(item.action)
+    )).every((item) => item.payload.accountWqId === 'test-owner'));
 });

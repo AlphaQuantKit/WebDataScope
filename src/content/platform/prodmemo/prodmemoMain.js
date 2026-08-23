@@ -13,8 +13,10 @@
     const RETRY_DELAYS = [1000, 2000, 4000];
     const pendingDatabaseRequests = new Map();
     const referenceRequests = new Map();
+    const ACCOUNT_SCOPED_DATABASE_ACTIONS = new Set(['SAVE_ALPHA_BATCH', 'SAVE_PNL', 'GET_SYNC_STATE']);
     let syncRunning = false;
     let syncAbortController = null;
+    let activeSyncAccountWqId = '';
 
     function delay(ms, signal) {
         return new Promise((resolve, reject) => {
@@ -70,6 +72,9 @@
 
     function databaseRequest(action, payload = {}) {
         const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const requestPayload = activeSyncAccountWqId && ACCOUNT_SCOPED_DATABASE_ACTIONS.has(action)
+            ? { ...payload, accountWqId: activeSyncAccountWqId }
+            : payload;
         return new Promise((resolve, reject) => {
             const timeoutId = setTimeout(() => {
                 pendingDatabaseRequests.delete(requestId);
@@ -80,7 +85,7 @@
                 type: 'WQP_PRODMEMO_DB_REQUEST',
                 requestId,
                 action,
-                payload,
+                payload: requestPayload,
             }, '*');
         });
     }
@@ -517,8 +522,26 @@
         return { alphaIds, pnlResult, backfill };
     }
 
+    async function readCurrentWqId(signal) {
+        try {
+            const response = await nativeFetch('https://api.worldquantbrain.com/users/self/consultant/summary', {
+                method: 'GET',
+                credentials: 'include',
+                cache: 'no-store',
+                headers: { accept: 'application/json' },
+                signal,
+            });
+            if (!response.ok) return '';
+            const data = await response.json();
+            return String(data?.leaderboard?.user || '').trim();
+        } catch {
+            return '';
+        }
+    }
+
     async function runIncrementalSync(signal) {
         let localState = await databaseRequest('GET_SYNC_STATE');
+        const accountWqId = activeSyncAccountWqId;
         postProgress({
             phase: 'incremental-check',
             mode: 'incremental',
@@ -624,6 +647,7 @@
                 remoteCount,
                 alphaCount: finalState.alphaIds.length,
                 submittedPnlCount: finalSubmittedPnlCount,
+                accountWqId,
                 alphaAction,
                 added: addedAlphaIds.length,
                 pnlRequested: pnlTargets.length,
@@ -655,6 +679,10 @@
         try {
             if (requestedMode === 'auto') {
                 actualMode = 'incremental';
+            }
+            activeSyncAccountWqId = await readCurrentWqId(signal);
+            if (!activeSyncAccountWqId) {
+                throw new Error('无法读取当前 WQ ID，请先登录 WorldQuant BRAIN 后再同步。');
             }
             await databaseRequest('SET_SYNC_META', {
                 patch: { status: 'running', mode: actualMode, startedAt: Date.now(), lastError: '' },
@@ -694,6 +722,7 @@
         } finally {
             syncRunning = false;
             syncAbortController = null;
+            activeSyncAccountWqId = '';
         }
     }
 

@@ -1,5 +1,5 @@
 export const PROD_MEMO_DB_NAME = 'WQP_ProdMemoDB';
-export const PROD_MEMO_DB_VERSION = 3;
+export const PROD_MEMO_DB_VERSION = 5;
 const PNL_FINGERPRINT_INDEX = 'byFingerprint';
 
 export const PROD_MEMO_STORES = Object.freeze({
@@ -8,6 +8,9 @@ export const PROD_MEMO_STORES = Object.freeze({
     platformCorrs: 'platformCorrs',
     localCorrs: 'localCorrs',
     syncMeta: 'syncMeta',
+    sharedRecords: 'sharedRecords',
+    sharedMeta: 'sharedMeta',
+    shareKeys: 'shareKeys',
 });
 
 let dbPromise = null;
@@ -40,6 +43,8 @@ function compactAlphaRecord(alpha) {
         },
         submitted: Boolean(alpha.submitted),
         noLongerSubmitted: Boolean(alpha.noLongerSubmitted),
+        source: alpha.source || 'legacy',
+        accountWqId: alpha.accountWqId || '',
         syncedAt: alpha.syncedAt ?? null,
         groupKey: alpha.groupKey ?? '',
     };
@@ -95,7 +100,16 @@ export function openProdMemoDatabase() {
             if (!db.objectStoreNames.contains(PROD_MEMO_STORES.syncMeta)) {
                 db.createObjectStore(PROD_MEMO_STORES.syncMeta, { keyPath: 'key' });
             }
-            if (request.oldVersion < 3) {
+            if (!db.objectStoreNames.contains(PROD_MEMO_STORES.sharedRecords)) {
+                db.createObjectStore(PROD_MEMO_STORES.sharedRecords, { keyPath: 'alias' });
+            }
+            if (!db.objectStoreNames.contains(PROD_MEMO_STORES.sharedMeta)) {
+                db.createObjectStore(PROD_MEMO_STORES.sharedMeta, { keyPath: 'key' });
+            }
+            if (!db.objectStoreNames.contains(PROD_MEMO_STORES.shareKeys)) {
+                db.createObjectStore(PROD_MEMO_STORES.shareKeys, { keyPath: 'key' });
+            }
+            if (request.oldVersion < 5) {
                 compactStoreRecords(alphaStore, compactAlphaRecord);
                 compactStoreRecords(platformStore, compactPlatformRecord);
             }
@@ -135,6 +149,34 @@ export async function getAllRecords(storeName) {
     const db = await openProdMemoDatabase();
     const transaction = db.transaction(storeName, 'readonly');
     return requestResult(transaction.objectStore(storeName).getAll());
+}
+
+export async function getSharedSnapshotMetadata() {
+    const db = await openProdMemoDatabase();
+    const transaction = db.transaction(PROD_MEMO_STORES.sharedRecords, 'readonly');
+    const request = transaction.objectStore(PROD_MEMO_STORES.sharedRecords).openCursor();
+    return new Promise((resolve, reject) => {
+        const records = [];
+        request.onsuccess = () => {
+            const cursor = request.result;
+            if (!cursor) {
+                resolve(records);
+                return;
+            }
+            const value = cursor.value || {};
+            records.push({
+                alias: value.alias,
+                sourceType: value.sourceType,
+                groupKey: value.groupKey,
+                prodCorr: value.prodCorr,
+                classifications: value.classifications,
+                updatedAt: value.updatedAt,
+                fingerprint: value.fingerprint || '',
+            });
+            cursor.continue();
+        };
+        request.onerror = () => reject(request.error);
+    });
 }
 
 export async function getRecord(storeName, key) {
@@ -183,6 +225,34 @@ export async function clearStores(storeNames) {
     const transaction = db.transaction(storeNames, 'readwrite');
     storeNames.forEach((storeName) => transaction.objectStore(storeName).clear());
     await transactionDone(transaction);
+}
+
+export async function getShareKey(key = 'default') {
+    return getRecord(PROD_MEMO_STORES.shareKeys, key);
+}
+
+export async function putShareKey(record) {
+    return putRecord(PROD_MEMO_STORES.shareKeys, record);
+}
+
+export async function replaceSharedSnapshot(records, meta = {}) {
+    const db = await openProdMemoDatabase();
+    const transaction = db.transaction([
+        PROD_MEMO_STORES.sharedRecords,
+        PROD_MEMO_STORES.sharedMeta,
+    ], 'readwrite');
+    transaction.objectStore(PROD_MEMO_STORES.sharedRecords).clear();
+    const recordStore = transaction.objectStore(PROD_MEMO_STORES.sharedRecords);
+    (records || []).forEach((record) => recordStore.put(record));
+    const metaStore = transaction.objectStore(PROD_MEMO_STORES.sharedMeta);
+    metaStore.clear();
+    metaStore.put({
+        key: 'active',
+        ...meta,
+        updatedAt: Date.now(),
+    });
+    await transactionDone(transaction);
+    return { saved: records?.length || 0, meta };
 }
 
 export async function countRecords(storeName) {

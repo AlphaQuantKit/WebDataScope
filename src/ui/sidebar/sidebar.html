@@ -35,6 +35,11 @@
                 <span>显示 API 监控面板</span>
               </label>
               <label class="check-row">
+                <input id="pnlShareEnabled" type="checkbox">
+                <span>启用 PNL / Prod Corr 共享</span>
+              </label>
+              <div class="info-box">开启后，只有完成完整增量同步且校验通过的 Alpha 才会上传；本地 Submitted 日期可以早于当前日期。上传不包含 WQ cookie；下载数据使用不可逆 Alpha alias。</div>
+              <label class="check-row">
                 <input id="llmEnabled" type="checkbox">
                 <span>启用 AI 总结和评论</span>
               </label>
@@ -140,6 +145,29 @@
                 <button id="clearProdMemoSyncBtn" class="danger" type="button">清空同步数据</button>
                 <input id="importProdMemoFile" type="file" accept="application/json,.json" hidden>
             </div>
+
+            <div class="section-title">PNL / Prod Corr 共享</div>
+            <div class="grid-actions">
+                <button id="uploadPnlShareBtn" class="primary" type="button" disabled>上传完整同步</button>
+                <button id="downloadPnlShareBtn" type="button" disabled>下载共享数据</button>
+                <button id="refreshPnlShareBtn" type="button">刷新共享状态</button>
+                <button id="downloadPnlShareExampleBtn" type="button" disabled>下载 Python 示例</button>
+            </div>
+            <div id="pnlShareProgress" class="progress-row pnl-share-progress" hidden>
+                <div class="progress-head">
+                    <span id="pnlShareProgressLabel">上传尚未开始</span>
+                    <span id="pnlShareProgressValue">0%</span>
+                </div>
+                <div class="progress-track" role="progressbar" aria-label="PNL 共享上传进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                    <div id="pnlShareProgressFill" class="progress-fill"></div>
+                </div>
+            </div>
+            <label class="field">
+                <span>10 天共享 Key（Python 使用 Authorization: Bearer）</span>
+                <input id="pnlShareKey" type="text" readonly autocomplete="off" placeholder="上传成功后生成">
+            </label>
+            <button id="copyPnlShareKeyBtn" type="button" disabled>复制 Key</button>
+            <div id="pnlShareStatus" class="info-box" aria-live="polite">共享状态加载中…</div>
 
             <div id="prodMemoStatus" class="info-box" aria-live="polite"></div>
 

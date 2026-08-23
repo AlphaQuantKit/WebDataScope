@@ -1,0 +1,116 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "webdatascope-pnl-share",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-18",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "routes": [
+    {
+      "pattern": "pnl-share.hualabtech.com",
+      "custom_domain": true
+    }
+  ],
+  "preview_urls": false,
+  "vars": {
+    "UPLOAD_ENABLED": "true",
+    "DOWNLOAD_ENABLED": "true",
+    "PUBLICATION_ENABLED": "true",
+    "EXTENSION_ORIGIN_MODE": "any-chrome-extension",
+    "KEY_VERSION": "1",
+    "R2_ACCOUNT_ID": "b4def5add7e193d2db7479a694383440",
+    "R2_BUCKET_NAME": "webdatascope-pnl-share-raw"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "webdatascope-pnl-share",
+      "database_id": "4b561c78-4055-45bd-854c-38e16407fb26",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "RAW_BUCKET",
+      "bucket_name": "webdatascope-pnl-share-raw"
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "SHARE_IP_RATE_LIMITER",
+      "namespace_id": "13001",
+      "simple": { "limit": 600, "period": 60 }
+    },
+    {
+      "name": "SHARE_INSTALL_RATE_LIMITER",
+      "namespace_id": "13002",
+      "simple": { "limit": 20, "period": 60 }
+    }
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "SNAPSHOT_QUEUE", "queue": "webdatascope-pnl-share-snapshot" }
+    ],
+    "consumers": [
+      { "queue": "webdatascope-pnl-share-snapshot", "max_batch_size": 1, "max_batch_timeout": 5, "max_retries": 5, "max_concurrency": 4 }
+    ]
+  },
+  "observability": {
+    "enabled": true,
+    "logs": { "head_sampling_rate": 0.1 },
+    "traces": { "enabled": true, "head_sampling_rate": 0.01 }
+  },
+  "triggers": { "crons": ["17 */2 * * *"] },
+  "env": {
+    "staging": {
+      "name": "webdatascope-pnl-share-staging",
+      "preview_urls": false,
+      "workers_dev": true,
+      "routes": [],
+      "vars": {
+        "UPLOAD_ENABLED": "true",
+        "DOWNLOAD_ENABLED": "true",
+        "PUBLICATION_ENABLED": "true",
+        "EXTENSION_ORIGIN_MODE": "any-chrome-extension",
+        "KEY_VERSION": "1",
+        "R2_ACCOUNT_ID": "b4def5add7e193d2db7479a694383440",
+        "R2_BUCKET_NAME": "webdatascope-pnl-share-raw-staging"
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "webdatascope-pnl-share-staging",
+          "database_id": "f78c29c4-59f0-4c10-a221-36cb58f262c8",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "RAW_BUCKET",
+          "bucket_name": "webdatascope-pnl-share-raw-staging"
+        }
+      ],
+      "ratelimits": [
+        {
+          "name": "SHARE_IP_RATE_LIMITER",
+          "namespace_id": "13101",
+          "simple": { "limit": 600, "period": 60 }
+        },
+        {
+          "name": "SHARE_INSTALL_RATE_LIMITER",
+          "namespace_id": "13102",
+          "simple": { "limit": 20, "period": 60 }
+        }
+      ],
+      "queues": {
+        "producers": [
+          { "binding": "SNAPSHOT_QUEUE", "queue": "webdatascope-pnl-share-snapshot-staging" }
+        ],
+        "consumers": [
+          { "queue": "webdatascope-pnl-share-snapshot-staging", "max_batch_size": 1, "max_batch_timeout": 5, "max_retries": 5, "max_concurrency": 16 }
+        ]
+      },
+      "triggers": { "crons": ["47 */2 * * *"] }
+    }
+  }
+}

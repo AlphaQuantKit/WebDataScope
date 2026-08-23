@@ -7,6 +7,7 @@ package-lock.json
 package.json
 !telemetry-worker/package.json
 !telemetry-worker/pnpm-lock.yaml
+!pnl-share-worker/package.json
 data/*
 figure/*
 img/screenshot.png
@@ -26,3 +27,7 @@ telemetry-worker/.dev.vars*
 telemetry-worker/.generated-secrets.json
 telemetry-worker/.admin-credentials.txt
 telemetry-worker/README.md
+pnl-share-worker/.wrangler/
+pnl-share-worker/.dev.vars*
+pnl-share-worker/.generated-secrets.json
+pnl-share-worker/.admin-credentials.txt

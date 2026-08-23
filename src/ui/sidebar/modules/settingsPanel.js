@@ -8,6 +8,7 @@ const ids = {
     geniusCombineTag: 'geniusCombineTag',
     geniusAlphaCount: 'geniusAlphaCount',
     apiMonitorEnabled: 'apiMonitorEnabled',
+    pnlShareEnabled: 'pnlShareEnabled',
     llmEnabled: 'llmEnabled',
     llmDefaultState: 'llmDefaultState',
     llmBaseUrl: 'llmBaseUrl',
@@ -24,6 +25,7 @@ function readSettingsFromForm() {
         geniusCombineTag: document.getElementById(ids.geniusCombineTag).checked,
         geniusAlphaCount: parseInt(document.getElementById(ids.geniusAlphaCount).value, 10) || 40,
         apiMonitorEnabled: document.getElementById(ids.apiMonitorEnabled).checked,
+        pnlShareEnabled: document.getElementById(ids.pnlShareEnabled).checked,
     };
 }
 
@@ -32,6 +34,7 @@ function writeSettingsToForm(settings) {
     document.getElementById(ids.geniusCombineTag).checked = settings.geniusCombineTag === true;
     document.getElementById(ids.geniusAlphaCount).value = settings.geniusAlphaCount || 40;
     document.getElementById(ids.apiMonitorEnabled).checked = settings.apiMonitorEnabled === true;
+    document.getElementById(ids.pnlShareEnabled).checked = settings.pnlShareEnabled === true;
 }
 
 function readLlmConfigFromForm() {

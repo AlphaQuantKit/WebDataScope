@@ -1,4 +1,4 @@
-export const PROD_MEMO_ALGORITHM_VERSION = 2;
+export const PROD_MEMO_ALGORITHM_VERSION = 3;
 
 export const POWER_POOL_CLASSIFICATION = 'POWER_POOL:POWER_POOL_ELIGIBLE';
 export const REGULAR_CLASSIFICATION = 'REGULAR:REGULAR';
@@ -30,6 +30,10 @@ export function alphaGroupKey(alpha) {
     return `${region}|${universe}|D${delay}`;
 }
 
+export function alphaCorrelationGroupKey(alpha) {
+    return normalizeText(alpha?.settings?.region ?? alpha?.region);
+}
+
 export function normalizePnl(data) {
     if (data && typeof data === 'object' && normalizedPnlCache.has(data)) {
         return normalizedPnlCache.get(data);
@@ -55,6 +59,14 @@ export function rollingWindowStart(records, years = 4) {
     if (Number.isNaN(end.getTime())) return '';
     end.setUTCFullYear(end.getUTCFullYear() - years);
     return end.toISOString().slice(0, 10);
+}
+
+export function trimPnlToRecentYears(data, years = 4) {
+    const records = normalizePnl(data);
+    if (!records.length) return records;
+    const startDate = rollingWindowStart(records, years);
+    if (!startDate) return records;
+    return records.filter(([date]) => date >= startDate);
 }
 
 export function collectDates(pnlRecords) {
@@ -131,10 +143,10 @@ export function isRegularAlpha(alpha) {
 
 export function selectCandidateAlphas(alphas, pnlById, targetAlpha, corrType) {
     const targetId = String(targetAlpha?.id || '');
-    const groupKey = alphaGroupKey(targetAlpha);
+    const groupKey = alphaCorrelationGroupKey(targetAlpha);
     return (alphas || []).filter((alpha) => {
         if (!alpha?.id || alpha.id === targetId || !alpha.submitted) return false;
-        if (!groupKey || alphaGroupKey(alpha) !== groupKey || !pnlById.has(alpha.id)) return false;
+        if (!groupKey || alphaCorrelationGroupKey(alpha) !== groupKey || !pnlById.has(alpha.id)) return false;
         if (corrType === 'SELF') {
             const selfEligible = alpha.stage === 'OS'
                 && (!isPowerPoolAlpha(alpha) || isRegularAlpha(alpha));
@@ -173,7 +185,7 @@ export function calculateLocalCorrelation({ targetAlpha, targetPnl, candidates, 
         return { available: false, reason: '目标 Alpha 的 PnL 数据不足。' };
     }
     if (!candidates.length) {
-        return { available: false, reason: `当前 universe-delay 组合没有可用的 ${corrType} 候选。` };
+        return { available: false, reason: `当前 region 没有可用的 ${corrType} 候选。` };
     }
 
     const endDate = targetRecords.at(-1)[0];
@@ -217,7 +229,7 @@ export function calculateProdLowerBound({ targetAlpha, targetPnl, references, pn
         return { available: false, reason: '目标 Alpha 的 PnL 数据不足。' };
     }
     if (!references.length) {
-        return { available: false, reason: '当前 universe-delay 组合没有完整的已知 Prod Corr 参考曲线。' };
+        return { available: false, reason: '当前 region 没有完整的已知 Prod Corr 参考曲线。' };
     }
 
     const endDate = targetRecords.at(-1)[0];
@@ -310,7 +322,7 @@ export function calculationFingerprint({ corrType, targetAlpha, targetPnl, candi
         `v${PROD_MEMO_ALGORITHM_VERSION}`,
         corrType,
         targetAlpha?.id || '',
-        alphaGroupKey(targetAlpha),
+        alphaCorrelationGroupKey(targetAlpha),
         pnlFingerprint(targetPnl),
     ];
     if (corrType === 'PROD_LOWER_BOUND') {

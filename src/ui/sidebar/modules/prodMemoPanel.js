@@ -1,5 +1,5 @@
 import { sendMessage } from './runtimeClient.js';
-import { downloadText, formatNow, setStatus } from './ui.js';
+import { downloadBytes, downloadText, formatNow, setStatus } from './ui.js';
 
 const ids = {
     summary: 'prodMemoSummary',
@@ -13,6 +13,17 @@ const ids = {
     importFile: 'importProdMemoFile',
     clear: 'clearProdMemoBtn',
     clearSync: 'clearProdMemoSyncBtn',
+    shareStatus: 'pnlShareStatus',
+    shareUpload: 'uploadPnlShareBtn',
+    shareDownload: 'downloadPnlShareBtn',
+    shareExample: 'downloadPnlShareExampleBtn',
+    shareRefresh: 'refreshPnlShareBtn',
+    shareKey: 'pnlShareKey',
+    shareCopy: 'copyPnlShareKeyBtn',
+    shareProgress: 'pnlShareProgress',
+    shareProgressLabel: 'pnlShareProgressLabel',
+    shareProgressValue: 'pnlShareProgressValue',
+    shareProgressFill: 'pnlShareProgressFill',
 };
 
 let latestMemoData = {};
@@ -22,6 +33,9 @@ let syncRunning = false;
 const ROW_BATCH_SIZE = 100;
 let renderLimit = ROW_BATCH_SIZE;
 let refreshTimer = null;
+let latestShareStatus = null;
+let sharePollTimer = null;
+let shareStatusRequest = null;
 
 function getEl(id) {
     return document.getElementById(id);
@@ -55,6 +69,11 @@ function setSyncRunning(running) {
     button.classList.toggle('danger', running);
 }
 
+export function localDownloadedRecordCount(status) {
+    const count = Number(status?.localSnapshot?.recordCount);
+    return Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+}
+
 function renderSummary(stats = latestStats) {
     latestStats = stats || {};
     const summary = getEl(ids.summary);
@@ -69,8 +88,127 @@ function renderSummary(stats = latestStats) {
         <div><strong>同步状态：</strong>${sync.status || '未同步'} · ${formatTime(sync.incrementalSyncedAt || sync.fullSyncedAt)}</div>
         ${sync.failedIds?.length ? `<div class="error"><strong>PnL 失败：</strong>${sync.failedIds.length}</div>` : ''}
         ${sync.backfillFailedIds?.length ? `<div class="error"><strong>历史回填失败：</strong>${sync.backfillFailedIds.length}</div>` : ''}
+        ${latestShareStatus ? `<div><strong>共享：</strong>${latestShareStatus.enabled ? (latestShareStatus.pendingUpload?.active ? `服务端处理中 ${latestShareStatus.pendingUpload.processed || 0}/${latestShareStatus.pendingUpload.partCount || 0}` : (latestShareStatus.uploadEligible ? `可上传 ${latestShareStatus.uploadRecords || 0} 条` : latestShareStatus.uploadReason)) : '未开启'}</div>` : ''}
+        ${latestShareStatus ? `<div><strong>本地已下载：</strong>${localDownloadedRecordCount(latestShareStatus)} 条</div>` : ''}
     `;
     setSyncRunning(sync.status === 'running');
+}
+
+export function formatShareStatusLines(status) {
+    if (!status?.enabled) return ['共享功能未开启。'];
+    const remote = status.remote;
+    const key = remote?.key;
+    const pending = status.pendingUpload;
+    const publishedCount = Number(remote?.snapshot?.recordCount || 0);
+    const buildingCount = Number(remote?.building?.recordCount || 0);
+    let uploadLine = status.uploadEligible
+        ? `上传条件满足：${status.uploadRecords || 0} 条`
+        : `暂不可上传：${status.uploadReason || '请先完成完整增量同步。'}`;
+    if (pending?.active) {
+        uploadLine = `上传任务处理中：${pending.processed || 0}/${pending.partCount || 0} 个分片${pending.retrying ? `，${pending.retrying} 个正在重试` : ''}；服务端已接管，可以关闭侧边栏或浏览器，稍后回来领取 Key。`;
+    } else if (pending?.state === 'failed') {
+        uploadLine = `上传任务失败：${pending.lastError || '服务端处理失败。'} 可重新上传。`;
+    } else if (pending?.state === 'expired') {
+        uploadLine = '上传任务已过期，可重新上传。';
+    }
+    return [
+        uploadLine,
+        status.hasKey ? `Key 剩余 ${key?.remaining ?? '-'} / ${key?.limit ?? 30} 次下载，${key?.expiresAt ? `到期 ${formatTime(key.expiresAt)}` : '状态未知'}` : '尚未获得共享 key。',
+        remote?.building
+            ? `${publishedCount > 0 ? `当前可下载 ${publishedCount} 条` : '当前暂无可下载数据'}；新版 ${buildingCount} 条构建中`
+            : remote?.snapshot ? `当前可下载 ${publishedCount} 条` : '',
+        status.remoteError ? `服务端状态：${status.remoteError}` : '',
+    ].filter(Boolean);
+}
+
+function renderShareStatus(status) {
+    const hadActivePendingUpload = latestShareStatus?.pendingUpload?.active === true;
+    latestShareStatus = status || null;
+    const element = getEl(ids.shareStatus);
+    if (element) {
+        const lines = formatShareStatusLines(status);
+        element.replaceChildren(...lines.map((text) => {
+            const line = document.createElement('div');
+            line.textContent = text;
+            return line;
+        }));
+        element.className = `info-box${status?.pendingUpload?.state === 'failed' ? ' error' : (status?.uploadEligible ? ' success' : '')}`;
+    }
+    const uploadButton = getEl(ids.shareUpload);
+    if (uploadButton) uploadButton.disabled = !status?.enabled || !status?.uploadEligible;
+    const downloadButton = getEl(ids.shareDownload);
+    if (downloadButton) downloadButton.disabled = !status?.enabled || !status?.hasKey;
+    const exampleButton = getEl(ids.shareExample);
+    if (exampleButton) exampleButton.disabled = !status?.enabled || !status?.hasKey;
+    const keyInput = getEl(ids.shareKey);
+    if (keyInput) keyInput.value = status?.accessKey || '';
+    const copyButton = getEl(ids.shareCopy);
+    if (copyButton) copyButton.disabled = !status?.accessKey;
+    const pending = status?.pendingUpload;
+    if (pending?.active) {
+        const total = Math.max(1, Number(pending.partCount) || 1);
+        const percent = 65 + Math.round((Math.min(total, Number(pending.processed) || 0) / total) * 30);
+        renderShareProgress({
+            phase: 'processing',
+            percent,
+            message: `服务端异步校验：${pending.processed || 0}/${pending.partCount || 0} 个分片；服务端已接管，可以关闭侧边栏或浏览器。`,
+        });
+    } else if (pending?.state === 'failed' || pending?.state === 'expired') {
+        renderShareProgress({ phase: 'error', percent: 0, message: pending.lastError || '上传任务已失效，可重新上传。' });
+    } else if (status?.completedUpload) {
+        renderShareProgress({ phase: 'completed', percent: 100, message: '共享上传完成，Key 已领取。' });
+        setPanelStatus(`共享上传完成：${status.completedUpload.recordCount || 0} 条；Key 有效至 ${formatTime(status.completedUpload.expiresAt)}。请妥善保存 Key。`, 'success');
+    } else if (hadActivePendingUpload) {
+        renderShareProgress({ phase: 'idle' });
+    }
+    updateSharePolling(status);
+    renderSummary(latestStats);
+}
+
+function renderShareProgress(progress) {
+    const container = getEl(ids.shareProgress);
+    if (!container) return;
+    if (!progress || progress.phase === 'idle') {
+        container.hidden = true;
+        return;
+    }
+    container.hidden = false;
+    const label = getEl(ids.shareProgressLabel);
+    const value = getEl(ids.shareProgressValue);
+    const fill = getEl(ids.shareProgressFill);
+    const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+    if (label) label.textContent = progress.message || '上传处理中…';
+    if (value) value.textContent = `${percent}%`;
+    if (fill) fill.style.width = `${percent}%`;
+    container.classList.toggle('is-error', progress.phase === 'error');
+    container.classList.toggle('is-complete', progress.phase === 'completed');
+}
+
+async function refreshShareStatus() {
+    if (shareStatusRequest) return shareStatusRequest;
+    shareStatusRequest = (async () => {
+        const status = await sendMessage('WQP_PNL_SHARE_STATUS');
+        renderShareStatus(status);
+        return status;
+    })();
+    try {
+        return await shareStatusRequest;
+    } finally {
+        shareStatusRequest = null;
+    }
+}
+
+function updateSharePolling(status) {
+    if (status?.pendingUpload?.active) {
+        if (!sharePollTimer) {
+            sharePollTimer = setInterval(() => {
+                refreshShareStatus().catch(() => {});
+            }, 5000);
+        }
+        return;
+    }
+    if (sharePollTimer) clearInterval(sharePollTimer);
+    sharePollTimer = null;
 }
 
 function metricChip(label, stat, source, options = {}) {
@@ -194,12 +332,114 @@ function renderList() {
 }
 
 async function refreshProdMemoPanel() {
+    // Render the local light snapshot first. Share eligibility scans all PnL
+    // records and may also call Cloudflare, so it must not block the first
+    // paint of the ProdMemo panel.
     const data = await sendMessage('WQP_PRODMEMO_GET');
     latestMemoData = data.memoData || {};
     renderLimit = ROW_BATCH_SIZE;
     renderSummary(data.stats || {});
     renderList();
+    refreshShareStatus().catch((error) => {
+        const element = getEl(ids.shareStatus);
+        if (element) {
+            element.textContent = `共享状态加载失败：${error.message || String(error)}`;
+            element.className = 'info-box error';
+        }
+    });
     return data;
+}
+
+async function uploadShare() {
+    renderShareProgress({ phase: 'preparing', percent: 0, message: '正在准备共享上传…' });
+    try {
+        const result = await sendMessage('WQP_PNL_SHARE_UPLOAD');
+        const status = await refreshShareStatus();
+        if (status?.completedUpload) {
+            renderShareProgress({ phase: 'completed', percent: 100, message: '共享上传完成，Key 已领取。' });
+            setPanelStatus(`共享上传完成：${status.completedUpload.recordCount || 0} 条；Key 有效至 ${formatTime(status.completedUpload.expiresAt)}。请妥善保存 Key。`, 'success');
+        } else {
+            renderShareProgress({
+                phase: 'queued',
+                percent: 65,
+                message: '分片上传完成，服务端已接管自动处理和 Key 签发；现在可以关闭侧边栏或浏览器。',
+            });
+            setPanelStatus(`已上传 ${result.recordCount || 0} 条（${result.partCount || 0} 个分片）。服务端已接管；可以关闭侧边栏或浏览器，稍后回来领取 Key。`, 'success');
+        }
+    } catch (error) {
+        renderShareProgress({ phase: 'error', percent: 0, message: `上传失败：${error.message || String(error)}` });
+        throw error;
+    }
+}
+
+async function downloadShare() {
+    const result = await sendMessage('WQP_PNL_SHARE_DOWNLOAD');
+    await refreshShareStatus();
+    await refreshProdMemoPanel();
+    setPanelStatus(`共享数据已保存：${result.recordCount || 0} 条、${result.pnlPointCount || 0} 个 PnL 点。`, 'success');
+}
+
+export function buildSharePythonExample(key) {
+    return `import requests
+from pathlib import Path
+
+# 这个 Key 仅供你本人使用，请不要提交到 Git 或发送给他人。
+BASE_URL = "https://pnl-share.hualabtech.com"
+KEY = ${JSON.stringify(key)}
+
+stats_response = requests.get(
+    f"{BASE_URL}/v1/share/stats",
+    headers={"Authorization": f"Bearer {KEY}"},
+    timeout=30,
+)
+stats_response.raise_for_status()
+stats = stats_response.json()
+snapshot = stats.get("snapshot") or {}
+totals = stats.get("totals") or {}
+if (
+    snapshot.get("status") != "published"
+    or snapshot.get("recordCount") != totals.get("recordCount")
+    or snapshot.get("pnlPointCount") != totals.get("pnlPointCount")
+):
+    raise RuntimeError("共享快照正在构建，请稍后重试。")
+
+download_response = requests.post(
+    f"{BASE_URL}/v1/share/download-url",
+    headers={"Authorization": f"Bearer {KEY}"},
+    timeout=30,
+)
+download_response.raise_for_status()
+download = download_response.json()
+response = None
+if download.get("direct") and download.get("downloadUrl"):
+    try:
+        response = requests.get(download["downloadUrl"], timeout=120)
+        response.raise_for_status()
+    except requests.RequestException:
+        response = None
+if response is None:
+    dataset_url = download.get("datasetUrl") or "/v1/share/dataset"
+    response = requests.get(
+        dataset_url if dataset_url.startswith("http") else f"{BASE_URL}{dataset_url}",
+        headers={"Authorization": f"Bearer {KEY}"},
+        timeout=120,
+    )
+response.raise_for_status()
+output = Path("wq-pnl-prod-corr.jsonl.gz")
+output.write_bytes(response.content)
+print(f"共享数据已下载到: {output.resolve()}")
+`;
+}
+
+function downloadSharePythonExample() {
+    const key = latestShareStatus?.accessKey || getEl(ids.shareKey)?.value || '';
+    if (!key) throw new Error('还没有共享 key，请先完成一次上传。');
+    downloadBytes(
+        `WQP_PNL_SHARE_example_${formatNow()}.py`,
+        buildSharePythonExample(key),
+        'text/x-python;charset=utf-8',
+    );
+    setPanelStatus('Python 示例已下载。', 'success');
 }
 
 function scheduleProdMemoRefresh(delay = 250) {
@@ -330,6 +570,31 @@ export async function initProdMemoPanel() {
     getEl(ids.clearSync).addEventListener('click', () => {
         runWithButton(ids.clearSync, clearSyncData).catch((error) => setPanelStatus(`清空失败：${error.message}`, 'error'));
     });
+    getEl(ids.shareUpload).addEventListener('click', () => {
+        runWithButton(ids.shareUpload, uploadShare).catch((error) => setPanelStatus(`共享上传失败：${error.message}`, 'error'));
+    });
+    getEl(ids.shareDownload).addEventListener('click', () => {
+        runWithButton(ids.shareDownload, downloadShare).catch((error) => setPanelStatus(`共享下载失败：${error.message}`, 'error'));
+    });
+    getEl(ids.shareExample).addEventListener('click', () => {
+        runWithButton(ids.shareExample, downloadSharePythonExample)
+            .catch((error) => setPanelStatus(`Python 示例下载失败：${error.message}`, 'error'));
+    });
+    getEl(ids.shareRefresh).addEventListener('click', () => {
+        runWithButton(ids.shareRefresh, refreshShareStatus)
+            .then(() => setPanelStatus('共享状态已刷新。', 'success'))
+            .catch((error) => setPanelStatus(`共享状态刷新失败：${error.message}`, 'error'));
+    });
+    getEl(ids.shareCopy).addEventListener('click', async () => {
+        const value = getEl(ids.shareKey).value;
+        if (!value) return;
+        try {
+            await navigator.clipboard.writeText(value);
+            setPanelStatus('共享 Key 已复制。请勿发送给不可信的人。', 'success');
+        } catch (error) {
+            setPanelStatus(`Key 复制失败：${error.message}`, 'error');
+        }
+    });
     getEl(ids.search).addEventListener('input', (event) => {
         currentSearch = event.target.value || '';
         renderLimit = ROW_BATCH_SIZE;
@@ -351,6 +616,10 @@ export async function initProdMemoPanel() {
     });
 
     chrome.runtime.onMessage.addListener((message) => {
+        if (message?.type === 'WQP_PNL_SHARE_UPLOAD_PROGRESS') {
+            renderShareProgress(message.payload || null);
+            return false;
+        }
         if (message?.type !== 'WQP_PRODMEMO_SYNC_PROGRESS') return false;
         const progress = message.payload || {};
         setPanelStatus([
@@ -363,7 +632,12 @@ export async function initProdMemoPanel() {
     });
 
     chrome.storage.onChanged.addListener((changes, namespace) => {
-        if (namespace !== 'local' || !changes.WQP_ProdMemo_DB_Revision) return;
-        scheduleProdMemoRefresh();
+        if (namespace !== 'local') return;
+        if (changes.WQP_ProdMemo_DB_Revision) scheduleProdMemoRefresh();
+        if (changes.WQP_Settings) refreshShareStatus().catch(() => {});
     });
+    window.addEventListener('pagehide', () => {
+        if (sharePollTimer) clearInterval(sharePollTimer);
+        sharePollTimer = null;
+    }, { once: true });
 }

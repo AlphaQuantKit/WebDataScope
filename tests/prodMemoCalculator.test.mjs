@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+    alphaCorrelationGroupKey,
     alphaGroupKey,
     calculationFingerprint,
     calculateForwardFilledReturns,
@@ -11,10 +12,13 @@ import {
     pearsonCorrelation,
     rollingWindowStart,
     selectCandidateAlphas,
+    trimPnlToRecentYears,
 } from '../src/background/services/prodMemoCalculator.js';
 import {
+    buildCalculationContext,
     extractPlatformCorrelationStats,
     resolvePreferredCorrelation,
+    sharedRecordsToCalculationPnls,
 } from '../src/background/services/prodMemoService.js';
 
 const settings = (delay = 1, universe = 'TOP3000', region = 'USA') => ({
@@ -57,6 +61,17 @@ test('PnL normalization, exact rolling window and forward-fill match the specifi
     assert.equal(normalizePnl(source), normalized);
     assert.equal(rollingWindowStart(normalized), '2022-08-05');
 
+    assert.deepEqual(
+        trimPnlToRecentYears({
+            records: [
+                ['2022-08-04', 0],
+                ['2022-08-05', 1],
+                ['2026-08-05', 2],
+            ],
+        }),
+        [['2022-08-05', 1], ['2026-08-05', 2]],
+    );
+
     const returns = calculateForwardFilledReturns(
         { records: [['2026-01-01', 1], ['2026-01-03', 4]] },
         ['2026-01-01', '2026-01-02', '2026-01-03'],
@@ -79,12 +94,18 @@ test('Pearson calculation reports overlap and preserves signed correlation', () 
     assert.deepEqual(negative, { value: -1, overlapCount: 3 });
 });
 
-test('candidate pools enforce region, universe, delay and v2 classifications', () => {
+test('candidate pools group by region only while preserving classification rules', () => {
     const target = alpha('target');
     const regular = alpha('regular');
     const differentDelay = alpha('delay', { settings: settings(0) });
+    const differentUniverse = alpha('universe', { settings: settings(1, 'TOP1000') });
+    const differentRegion = alpha('region', { settings: settings(1, 'TOP3000', 'EUR') });
     const powerOnly = alpha('power', {
         stage: 'IS',
+        classifications: [{ id: 'POWER_POOL:POWER_POOL_ELIGIBLE' }],
+    });
+    const powerDifferentUniverseDelay = alpha('power-other-group', {
+        settings: settings(0, 'TOP1000'),
         classifications: [{ id: 'POWER_POOL:POWER_POOL_ELIGIBLE' }],
     });
     const powerRegular = alpha('power-regular', {
@@ -94,18 +115,31 @@ test('candidate pools enforce region, universe, delay and v2 classifications', (
         ],
     });
     const notSubmitted = alpha('draft', { submitted: false });
-    const alphas = [target, regular, differentDelay, powerOnly, powerRegular, notSubmitted];
+    const alphas = [
+        target,
+        regular,
+        differentDelay,
+        differentUniverse,
+        differentRegion,
+        powerOnly,
+        powerDifferentUniverseDelay,
+        powerRegular,
+        notSubmitted,
+    ];
     const pnlById = new Map(alphas.map((item) => [item.id, pnl(item.id, [0, 1, 3, 6])]));
 
     assert.deepEqual(
         selectCandidateAlphas(alphas, pnlById, target, 'SELF').map((item) => item.id),
-        ['regular', 'power', 'power-regular'],
+        ['regular', 'delay', 'universe', 'power', 'power-other-group', 'power-regular'],
     );
     assert.deepEqual(
         selectCandidateAlphas(alphas, pnlById, target, 'POOL').map((item) => item.id),
-        ['power', 'power-regular'],
+        ['power', 'power-other-group', 'power-regular'],
     );
     assert.equal(alphaGroupKey(differentDelay), 'USA|TOP3000|D0');
+    assert.equal(alphaCorrelationGroupKey(differentDelay), 'USA');
+    assert.equal(alphaCorrelationGroupKey(differentUniverse), 'USA');
+    assert.equal(alphaCorrelationGroupKey(differentRegion), 'EUR');
 });
 
 test('local Self/Pool calculation returns signed extrema and overlap metadata', () => {
@@ -172,6 +206,61 @@ test('a target with platform Prod Corr uses itself as the exact lower-bound witn
     assert.equal(result.max, 0.82);
     assert.equal(result.witness.alphaId, 'target');
     assert.equal(result.witness.correlation, 1);
+});
+
+test('downloaded shared PnL is used only as a Prod lower-bound reference', () => {
+    const target = alpha('target');
+    const shared = {
+        ...alpha('alpha_shared', {
+            submitted: false,
+            settings: settings(0, 'TOP1000'),
+        }),
+        shared: true,
+        source: 'shared',
+    };
+    const [sharedPnl] = sharedRecordsToCalculationPnls([{
+        alias: shared.id,
+        pnl: pnl(shared.id, [0, 2, 6, 12]),
+        fingerprint: 'shared-fingerprint',
+    }]);
+    const targetPnl = pnl(target.id, [0, 1, 3, 6]);
+    const pnlById = new Map([
+        [target.id, targetPnl],
+        [shared.id, sharedPnl],
+    ]);
+
+    assert.deepEqual(selectCandidateAlphas([shared], pnlById, target, 'SELF'), []);
+    assert.deepEqual(selectCandidateAlphas([shared], pnlById, target, 'POOL'), []);
+    assert.notEqual(alphaGroupKey(shared), alphaGroupKey(target));
+    assert.equal(alphaCorrelationGroupKey(shared), alphaCorrelationGroupKey(target));
+
+    const snapshot = {
+        alphas: [target, shared],
+        pnls: [targetPnl, sharedPnl],
+        platformCorrs: [{
+            alphaId: shared.id,
+            prod: { max: 0.75, updated: 1, source: 'shared' },
+            shared: true,
+        }],
+        localCorrs: [],
+    };
+    assert.deepEqual(buildCalculationContext(snapshot, target.id, 'SELF').candidates, []);
+    assert.deepEqual(buildCalculationContext(snapshot, target.id, 'POOL').candidates, []);
+    assert.deepEqual(
+        buildCalculationContext(snapshot, target.id, 'PROD_LOWER_BOUND').references.map((item) => item.alpha.id),
+        [shared.id],
+    );
+
+    const result = calculateProdLowerBound({
+        targetAlpha: target,
+        targetPnl,
+        references: [{ alpha: shared, platformProdMax: 0.75 }],
+        pnlById,
+    });
+    assert.equal(sharedPnl.source, 'shared');
+    assert.equal(result.available, true);
+    assert.equal(result.witness.alphaId, shared.id);
+    assert.equal(result.max, 0.75);
 });
 
 test('calculation fingerprints change when PnL or known Prod Corr changes', () => {

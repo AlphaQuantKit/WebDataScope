@@ -783,6 +783,18 @@ button.loading::before {
     transition: width 0.2s ease;
 }
 
+.pnl-share-progress {
+    margin-top: 10px;
+}
+
+.pnl-share-progress.is-complete .progress-fill {
+    background: var(--success);
+}
+
+.pnl-share-progress.is-error .progress-fill {
+    background: var(--error);
+}
+
 .log-list {
     max-height: 240px;
     margin: 0;
