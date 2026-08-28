@@ -62,7 +62,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return respond(sendResponse, performKeepAlive({ manual: true }));
     }
     if (msg.type === 'WQP_SESSION_LOGIN_NOW') {
-        return respond(sendResponse, triggerAutoLogin().then(() => getSessionKeeperState()));
+        return respond(sendResponse, triggerAutoLogin({ manual: true }).then(() => getSessionKeeperState()));
     }
     if (msg.type === 'WQP_SESSION_CLEAR_LOGS') {
         return respond(sendResponse, clearSessionKeeperLogs());

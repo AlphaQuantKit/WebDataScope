@@ -5,6 +5,7 @@ const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.me
 const releaseNotes = await readFile(new URL('../RELEASE_NOTES.md', import.meta.url), 'utf8');
 const background = await readFile(new URL('../src/background/background.js', import.meta.url), 'utf8');
 const telemetry = await readFile(new URL('../src/background/services/telemetryService.js', import.meta.url), 'utf8');
+const sidebar = await readFile(new URL('../src/ui/sidebar/sidebar.html', import.meta.url), 'utf8');
 
 const changelog = await decodeModule('../src/ui/sidebar/modules/changelogData.js');
 const guide = await decodeModule('../src/ui/sidebar/modules/guideData.js');
@@ -23,6 +24,10 @@ assert.match(background, /import \{ initTelemetryService \} from '\.\/services\/
 assert.doesNotMatch(telemetry, /import\s*\(/, 'MV3 service worker must not use dynamic import().');
 assert.match(telemetry, /credentials:\s*'omit'/);
 assert.doesNotMatch(telemetry, /chrome\.cookies/);
+assert.ok(
+    sidebar.indexOf('id="acknowledgementsBox"') < sidebar.indexOf('id="changelogBox"'),
+    'Acknowledgements must appear above the changelog.',
+);
 
 const privacySection = guide.sections?.find((section) => String(section.title).includes('版本登记'));
 assert.ok(privacySection, 'Guide must include the version-registration privacy section.');

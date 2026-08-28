@@ -27,6 +27,21 @@ function formatTime(value) {
     return date.toLocaleString();
 }
 
+export function formatExpiryTime(expiry, source, now = Date.now()) {
+    if (!expiry) return `-（${expirySourceLabel(source)}）`;
+    const date = new Date(expiry);
+    if (Number.isNaN(date.getTime())) return `-（${expirySourceLabel(source)}）`;
+    const remainingMs = Number(expiry) - now;
+    let remainingText = '已过期';
+    if (remainingMs > 0) {
+        const totalMinutes = Math.floor(remainingMs / 60000);
+        const hours = Math.floor(totalMinutes / 60);
+        const minutes = totalMinutes % 60;
+        remainingText = hours > 0 ? `剩余 ${hours}小时${minutes}分` : `剩余 ${minutes}分钟`;
+    }
+    return `${date.toLocaleString()}（${remainingText}，${expirySourceLabel(source)}）`;
+}
+
 function statusLabel(status) {
     const labels = {
         valid: '有效',
@@ -89,7 +104,7 @@ function renderStatus(data = {}) {
             ['状态', `${statusLabel(state.status)}${state.isLoginInProgress ? '（重登中）' : ''}`],
             ['用户', state.userId || '-'],
             ['最近检查', formatTime(state.lastChecked)],
-            ['过期时间', `${formatTime(state.sessionExpiry)}（${expirySourceLabel(state.sessionExpirySource)}）`],
+            ['过期时间', formatExpiryTime(state.sessionExpiry, state.sessionExpirySource)],
             ['最近 Token', `${state.hasToken ? '已捕获' : '未捕获'} / ${formatTime(state.lastTokenTime)}`],
             ['最近重登', `${formatTime(state.lastLoginTime)} / ${state.lastLoginSuccess === true ? '成功' : state.lastLoginSuccess === false ? '失败' : '未触发'}`],
             ['自动重登', `${config.autoLoginEnabled ? '启用' : '关闭'}${config.hasPassword ? '，已保存密码' : ''}`],
@@ -174,7 +189,7 @@ export async function initSessionPanel() {
     });
 
     getEl(ids.login).addEventListener('click', () => {
-        runAction(ids.login, 'WQP_SESSION_LOGIN_NOW', '已触发自动重登。');
+        runAction(ids.login, 'WQP_SESSION_LOGIN_NOW', 'API 重登成功，浏览器 Cookie 已更新。');
     });
 
     getEl(ids.clearLogs).addEventListener('click', () => {

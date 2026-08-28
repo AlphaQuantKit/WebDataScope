@@ -3,7 +3,6 @@
 const CONFIG_KEY = 'WQP_SessionKeeperConfig';
 const STATE_KEY = 'WQP_SessionKeeperState';
 const ALARM_NAME = 'WQP_SESSION_KEEP_ALIVE';
-const SIGN_IN_URL = 'https://platform.worldquantbrain.com/sign-in';
 const AUTHENTICATION_URL = 'https://api.worldquantbrain.com/authentication';
 
 const DEFAULT_CONFIG = {
@@ -153,7 +152,7 @@ function parseJwtExpiry(token) {
     }
 }
 
-function readAuthenticationSession(data, now = Date.now()) {
+export function readAuthenticationSession(data, now = Date.now()) {
     const expirySeconds = Number(data?.token?.expiry);
     const userId = String(data?.user?.id || '').trim();
     if (!Number.isFinite(expirySeconds)) return null;
@@ -163,6 +162,48 @@ function readAuthenticationSession(data, now = Date.now()) {
         sessionExpiry: now + Math.max(0, expirySeconds) * 1000,
         sessionExpirySource: 'authentication',
     };
+}
+
+export function isExpiredAuthenticationStatus(status) {
+    return status === 204 || status === 401 || status === 403;
+}
+
+export function encodeBasicAuthorization(email, password) {
+    const bytes = new TextEncoder().encode(`${String(email || '')}:${String(password || '')}`);
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return `Basic ${btoa(binary)}`;
+}
+
+function readAuthenticationError(data, status) {
+    const candidate = data?.detail
+        || data?.message
+        || data?.error
+        || data?.non_field_errors?.[0]
+        || data?.email?.[0];
+    const detail = typeof candidate === 'string' ? candidate.trim().slice(0, 300) : '';
+    return detail ? `HTTP ${status}: ${detail}` : `HTTP ${status}`;
+}
+
+export async function requestApiLogin(email, password, fetchImpl = fetch) {
+    const response = await fetchImpl(AUTHENTICATION_URL, {
+        method: 'POST',
+        mode: 'cors',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+            Accept: 'application/json;version=2.0',
+            Authorization: encodeBasicAuthorization(email, password),
+        },
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(`API login failed: ${readAuthenticationError(data, response.status)}.`);
+
+    const authSession = readAuthenticationSession(data);
+    if (!authSession || authSession.expirySeconds <= 0) {
+        throw new Error('API login failed: authentication response did not contain a valid token expiry.');
+    }
+    return authSession;
 }
 
 export async function handleCapturedSessionToken(token) {
@@ -240,14 +281,14 @@ async function checkSessionViaProbe() {
             },
         });
 
-        if (response.status === 401 || response.status === 403) {
+        if (isExpiredAuthenticationStatus(response.status)) {
             await updateState({
                 status: 'expired',
                 lastChecked: now,
                 userId: '',
                 sessionExpiry: null,
                 sessionExpirySource: 'authentication',
-                lastError: `Probe returned ${response.status}.`,
+                lastError: `Probe returned ${response.status}; authentication is required.`,
             });
             await logDebug(`Session expired. Probe returned ${response.status}.`);
             return 'expired';
@@ -313,231 +354,76 @@ async function checkSessionViaProbe() {
     }
 }
 
-function autoFillAndSubmit(email, password) {
-    function notify(status, message = '') {
-        try {
-            chrome.runtime.sendMessage({ type: 'WQP_SESSION_LOGIN_SIGNAL', status, message });
-        } catch (_) {
-            // The background page also polls URL as a fallback.
-        }
-    }
-
-    function waitFor(selector, timeout = 8000) {
-        return new Promise((resolve) => {
-            const found = document.querySelector(selector);
-            if (found) {
-                resolve(found);
-                return;
-            }
-            const observer = new MutationObserver(() => {
-                const node = document.querySelector(selector);
-                if (node) {
-                    observer.disconnect();
-                    resolve(node);
-                }
-            });
-            observer.observe(document.documentElement || document.body, {
-                childList: true,
-                subtree: true,
-            });
-            setTimeout(() => {
-                observer.disconnect();
-                resolve(null);
-            }, timeout);
-        });
-    }
-
-    (async () => {
-        try {
-            const challengeTitle = document.querySelector('h1,h2,[role="heading"]');
-            const challengeText = challengeTitle?.textContent || '';
-            if (/Security Check|Pardon the interruption|captcha/i.test(challengeText)) {
-                notify('error', 'Captcha or security check detected.');
-                return;
-            }
-
-            const emailInput = await waitFor('input#email, input[name="email"], input[type="email"]');
-            const passwordInput = await waitFor('input#password, input[name="currentPassword"], input[type="password"]');
-            if (!emailInput || !passwordInput) {
-                notify('error', 'Login inputs not found.');
-                return;
-            }
-
-            const valueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-            if (valueSetter) {
-                valueSetter.call(emailInput, email);
-                valueSetter.call(passwordInput, password);
-            } else {
-                emailInput.value = email;
-                passwordInput.value = password;
-            }
-            emailInput.dispatchEvent(new Event('input', { bubbles: true }));
-            emailInput.dispatchEvent(new Event('change', { bubbles: true }));
-            passwordInput.dispatchEvent(new Event('input', { bubbles: true }));
-            passwordInput.dispatchEvent(new Event('change', { bubbles: true }));
-
-            const submit = await waitFor('button[type="submit"], button.MuiButton-containedPrimary');
-            if (submit) {
-                submit.click();
-            } else {
-                const form = passwordInput.closest('form') || document.querySelector('form');
-                if (form) form.requestSubmit ? form.requestSubmit() : form.submit();
-            }
-
-            let checks = 0;
-            const timer = setInterval(() => {
-                checks += 1;
-                const alert = document.querySelector('[role="alert"], .MuiAlert-standardError, .error-message');
-                if (alert?.textContent) {
-                    clearInterval(timer);
-                    notify('error', alert.textContent.trim());
-                    return;
-                }
-                if (document.querySelector('input[name="otp"], input[autocomplete="one-time-code"]')) {
-                    clearInterval(timer);
-                    notify('error', '2FA detected.');
-                    return;
-                }
-                if (!location.href.includes('sign-in')) {
-                    clearInterval(timer);
-                    notify('success');
-                    return;
-                }
-                if (checks > 24) clearInterval(timer);
-            }, 500);
-        } catch (error) {
-            notify('error', error.message);
-        }
-    })();
-}
-
-async function performAutoLogin(email, password) {
-    let loginTabId = null;
+async function performApiLogin(email, password) {
     try {
-        await logDebug(`Starting background auto-login for ${email}...`);
-        const tab = await chrome.tabs.create({ url: SIGN_IN_URL, active: false });
-        loginTabId = tab.id;
+        await logDebug('Starting API auto-login with the saved account...');
+        await requestApiLogin(email, password);
+        await logDebug('API login returned successfully; verifying the updated browser cookie...');
 
-        await new Promise((resolve) => {
-            const listener = (tabId, changeInfo) => {
-                if (tabId === loginTabId && changeInfo.status === 'complete') {
-                    chrome.tabs.onUpdated.removeListener(listener);
-                    resolve();
-                }
-            };
-            chrome.tabs.onUpdated.addListener(listener);
-            setTimeout(() => {
-                chrome.tabs.onUpdated.removeListener(listener);
-                resolve();
-            }, 12000);
-        });
-
-        await chrome.scripting.executeScript({
-            target: { tabId: loginTabId },
-            func: autoFillAndSubmit,
-            args: [email, password],
-        });
-
-        const result = await new Promise((resolve) => {
-            const messageListener = (request, sender) => {
-                if (sender?.tab?.id !== loginTabId) return;
-                if (request?.type !== 'WQP_SESSION_LOGIN_SIGNAL') return;
-                if (request.status === 'success') {
-                    cleanup();
-                    resolve('success');
-                } else if (request.status === 'error') {
-                    cleanup();
-                    resolve(request.message || 'error');
-                }
-            };
-            const poller = setInterval(async () => {
-                try {
-                    const current = await chrome.tabs.get(loginTabId);
-                    if (current?.url && !current.url.includes('sign-in') && !current.url.includes('about:blank')) {
-                        cleanup();
-                        resolve('success');
-                    }
-                } catch (_) {
-                    cleanup();
-                    resolve('closed');
-                }
-            }, 1000);
-            const timeout = setTimeout(() => {
-                cleanup();
-                resolve('timeout');
-            }, 25000);
-            function cleanup() {
-                clearInterval(poller);
-                clearTimeout(timeout);
-                chrome.runtime.onMessage.removeListener(messageListener);
-            }
-            chrome.runtime.onMessage.addListener(messageListener);
-        });
-
-        if (result === 'success') {
-            loginRetryCount = 0;
-            const now = Date.now();
-            await updateState({
-                lastLoginTime: now,
-                lastLoginAttemptTime: now,
-                lastLoginSuccess: true,
-                lastChecked: now,
-                lastError: '',
-            });
-            await logDebug('Auto-login succeeded. Refreshing authentication session.');
-            await checkSessionViaProbe();
-        } else {
-            await updateState({
-                status: 'login-failed',
-                lastLoginAttemptTime: Date.now(),
-                lastLoginSuccess: false,
-                lastError: `Auto-login failed: ${result}`,
-            });
-            await logDebug(`Auto-login failed: ${result}`);
-            if (result !== 'error' && result !== 'Captcha or security check detected.' && loginRetryCount < MAX_LOGIN_RETRIES) {
-                setTimeout(() => {
-                    triggerAutoLogin().catch((error) => logDebug(`Retry failed: ${error.message}`));
-                }, LOGIN_COOLDOWN_MS + 1000);
-            }
+        const status = await checkSessionViaProbe();
+        if (status !== 'valid') {
+            throw new Error('API login returned successfully, but the updated cookie did not produce a valid session.');
         }
+
+        loginRetryCount = 0;
+        const now = Date.now();
+        await updateState({
+            lastLoginTime: now,
+            lastLoginAttemptTime: now,
+            lastLoginSuccess: true,
+            lastChecked: now,
+            lastError: '',
+        });
+        await logDebug('API auto-login succeeded and the browser cookie is valid.');
+        return true;
+    } catch (error) {
+        const message = error?.message || String(error);
+        await updateState({
+            status: 'login-failed',
+            lastLoginAttemptTime: Date.now(),
+            lastLoginSuccess: false,
+            lastError: message,
+        });
+        await logDebug(`API auto-login failed: ${message}`);
+        return false;
     } finally {
-        if (loginTabId) {
-            try {
-                await chrome.tabs.remove(loginTabId);
-            } catch (_) {
-                // The user may have closed it.
-            }
-        }
         isLoginInProgress = false;
         await updateState({ isLoginInProgress: false });
     }
 }
 
-export async function triggerAutoLogin() {
+export async function triggerAutoLogin({ manual = false } = {}) {
     const config = await getConfigRaw();
-    if (!config.enabled || !config.autoLoginEnabled) {
+    if (!manual && (!config.enabled || !config.autoLoginEnabled)) {
         await logDebug('Auto-login skipped because it is disabled.');
         return false;
     }
     if (!config.authEmail || !config.authPassword) {
-        await updateState({ status: 'login-failed', lastError: 'Missing saved email or password.' });
+        const message = 'Missing saved email or password.';
+        await updateState({ status: 'login-failed', lastError: message });
         await logDebug('Auto-login skipped because credentials are missing.');
+        if (manual) throw new Error(message);
         return false;
     }
     if (isLoginInProgress) {
-        await logDebug('Auto-login is already running.');
+        const message = 'API auto-login is already running.';
+        await logDebug(message);
+        if (manual) throw new Error(message);
         return false;
     }
     const now = Date.now();
-    if (now - lastLoginAttempt < LOGIN_COOLDOWN_MS) {
+    const state = await getStateRaw();
+    const mostRecentAttempt = Math.max(lastLoginAttempt, Number(state.lastLoginAttemptTime || 0));
+    if (!manual && now - mostRecentAttempt < LOGIN_COOLDOWN_MS) {
         await logDebug('Auto-login cooldown is active.');
         return false;
     }
-    if (loginRetryCount >= MAX_LOGIN_RETRIES) {
+    if (!manual && loginRetryCount >= MAX_LOGIN_RETRIES) {
         await logDebug('Auto-login retry limit reached.');
         return false;
     }
 
+    if (manual) loginRetryCount = 0;
     isLoginInProgress = true;
     lastLoginAttempt = now;
     loginRetryCount += 1;
@@ -546,8 +432,12 @@ export async function triggerAutoLogin() {
         lastLoginAttemptTime: now,
         lastError: '',
     });
-    performAutoLogin(config.authEmail, deobfuscate(config.authPassword));
-    return true;
+    const success = await performApiLogin(config.authEmail, deobfuscate(config.authPassword));
+    if (!success && manual) {
+        const failedState = await getStateRaw();
+        throw new Error(failedState.lastError || 'API auto-login failed.');
+    }
+    return success;
 }
 
 export async function performKeepAlive({ manual = false } = {}) {
@@ -567,11 +457,12 @@ export async function performKeepAlive({ manual = false } = {}) {
     }
 
     const status = await checkSessionViaProbe();
-    loginRetryCount = 0;
     if (status === 'expired') {
         await triggerAutoLogin();
         return getSessionKeeperState();
     }
+
+    if (status === 'valid') loginRetryCount = 0;
 
     const state = await getStateRaw();
     const sessionExpiry = Number(state.sessionExpiry || 0);

@@ -113,6 +113,10 @@
     width: 46px;
 }
 
+.wqp-distribution-row-total-column {
+    width: 56px;
+}
+
 .wqp-distribution-table th,
 .wqp-distribution-table td {
     box-sizing: border-box;
@@ -136,6 +140,18 @@
     position: sticky;
     width: 160px;
     z-index: 5;
+}
+
+.wqp-distribution-row-total-header {
+    background: var(--wqp-distribution-region-header);
+    border-left: 2px solid #536174;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    height: 74px;
+    min-width: 56px;
+    text-align: center;
+    width: 56px;
 }
 
 .wqp-distribution-delay-header,
@@ -189,6 +205,25 @@
 
 .wqp-distribution-table .is-region-start {
     border-left: 1px solid #d9dee4;
+}
+
+.wqp-distribution-table td.wqp-distribution-row-total-cell {
+    background: #eef2f5;
+    border-left: 2px solid var(--wqp-distribution-border);
+    padding: 0;
+    width: 56px;
+}
+
+.wqp-distribution-row-total {
+    align-items: center;
+    color: #344050;
+    display: flex;
+    flex-direction: column;
+    font-size: 12px;
+    font-weight: 700;
+    height: 40px;
+    justify-content: center;
+    line-height: 1;
 }
 
 .wqp-distribution-value {
@@ -247,7 +282,7 @@
 .wqp-distribution-table tfoot td {
     background: #eef2f5;
     border-top: 1px solid var(--wqp-distribution-border);
-    height: 34px;
+    height: 40px;
 }
 
 .wqp-distribution-total-label {
@@ -256,10 +291,36 @@
 }
 
 .wqp-distribution-total {
+    align-items: center;
     color: #344050;
+    display: flex;
+    flex-direction: column;
     font-size: 11px;
     font-weight: 700;
+    height: 40px;
+    justify-content: center;
+    line-height: 1;
     text-align: center;
+}
+
+.wqp-distribution-total-count {
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.wqp-distribution-total-ratio {
+    font-size: 8px;
+    font-weight: 500;
+    margin-top: 3px;
+    opacity: .8;
+}
+
+.wqp-distribution-grand-total {
+    font-size: 12px;
+}
+
+.wqp-distribution-grand-total .wqp-distribution-total-count {
+    font-size: 12px;
 }
 
 .wqp-distribution-state {
@@ -322,6 +383,13 @@
     .wqp-distribution-data-column,
     .wqp-distribution-table td {
         width: 42px;
+    }
+
+    .wqp-distribution-row-total-column,
+    .wqp-distribution-row-total-header,
+    .wqp-distribution-table td.wqp-distribution-row-total-cell {
+        min-width: 52px;
+        width: 52px;
     }
 
     .wqp-distribution-value {

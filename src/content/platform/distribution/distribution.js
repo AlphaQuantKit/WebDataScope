@@ -36,6 +36,11 @@
         };
     }
 
+    function ratioToTotal(value, total) {
+        const normalizedTotal = finiteNumber(total);
+        return normalizedTotal > 0 ? finiteNumber(value) / normalizedTotal : 0;
+    }
+
     function resolveCellAppearance(check, ratio) {
         const normalizedCheck = String(check || '').trim().toUpperCase();
         if (normalizedCheck === 'FAIL') {
@@ -54,6 +59,7 @@
         const categoriesById = new Map();
         const totals = new Map();
         const cells = new Map();
+        const rowTotals = new Map();
 
         rows.forEach((row) => {
             const region = String(row?.region || '').trim().toUpperCase();
@@ -102,6 +108,10 @@
                 ...cell,
                 ratio: totals.get(groupKey) > 0 ? cell.alphaCount / totals.get(groupKey) : 0,
             });
+            rowTotals.set(
+                cell.categoryId,
+                finiteNumber(rowTotals.get(cell.categoryId)) + cell.alphaCount,
+            );
         }
 
         const regions = uniqueValuesInOrder([...regionSet]);
@@ -120,6 +130,8 @@
             columns,
             delaysByRegion,
             totals,
+            rowTotals,
+            grandTotal: [...totals.values()].reduce((sum, value) => sum + finiteNumber(value), 0),
             cells,
         };
     }
@@ -127,6 +139,7 @@
     const modelApi = Object.freeze({
         normalizeDiversityData,
         percentageGradient,
+        ratioToTotal,
         resolveCellAppearance,
         uniqueValuesInOrder,
     });
@@ -148,6 +161,15 @@
         if (percentage === 0) return '0%';
         if (percentage < 1) return '<1%';
         return `${Math.round(percentage)}%`;
+    }
+
+    function createTotalValue(count, total, className) {
+        const value = createElement('div', className);
+        value.append(
+            createElement('span', 'wqp-distribution-total-count', String(count)),
+            createElement('span', 'wqp-distribution-total-ratio', formatPercent(ratioToTotal(count, total))),
+        );
+        return value;
     }
 
     function createHeader(model) {
@@ -225,6 +247,7 @@
         const columns = document.createElement('colgroup');
         columns.appendChild(createElement('col', 'wqp-distribution-category-column'));
         model.columns.forEach(() => columns.appendChild(createElement('col', 'wqp-distribution-data-column')));
+        columns.appendChild(createElement('col', 'wqp-distribution-row-total-column'));
         const head = document.createElement('thead');
         const regionRow = document.createElement('tr');
         const categoryHeader = createElement('th', 'wqp-distribution-category-header', 'Category');
@@ -234,6 +257,11 @@
             regionHeader.colSpan = model.delaysByRegion.get(region)?.size || 1;
             regionRow.appendChild(regionHeader);
         });
+        const rowTotalHeader = createElement('th', 'wqp-distribution-row-total-header', 'TOTAL');
+        rowTotalHeader.rowSpan = 2;
+        rowTotalHeader.scope = 'col';
+        rowTotalHeader.title = '每个 Data Category 跨全部 Region / Delay 的 Alpha 总数';
+        regionRow.appendChild(rowTotalHeader);
 
         const delayRow = document.createElement('tr');
         delayRow.appendChild(createElement('th', 'wqp-distribution-delay-spacer'));
@@ -256,6 +284,13 @@
             nameCell.title = category.id;
             row.appendChild(nameCell);
             model.columns.forEach((column) => row.appendChild(createValueCell(model, category, column)));
+            const rowTotal = model.rowTotals.get(category.id) || 0;
+            const rowTotalCell = createElement('td', 'wqp-distribution-row-total-cell');
+            const rowTotalValue = createTotalValue(rowTotal, model.totalAlphaCount, 'wqp-distribution-row-total');
+            rowTotalValue.title = `${category.name}: ${rowTotal}/${model.totalAlphaCount} (${formatPercent(ratioToTotal(rowTotal, model.totalAlphaCount))})`;
+            rowTotalValue.setAttribute('aria-label', rowTotalValue.title);
+            rowTotalCell.appendChild(rowTotalValue);
+            row.appendChild(rowTotalCell);
             body.appendChild(row);
         });
 
@@ -264,13 +299,19 @@
         totalRow.appendChild(createElement('th', 'wqp-distribution-category wqp-distribution-total-label', 'TOTAL'));
         model.columns.forEach((column) => {
             const totalCell = createElement('td', column.firstInRegion ? 'is-region-start' : '');
-            totalCell.appendChild(createElement(
-                'div',
-                'wqp-distribution-total',
-                String(model.totals.get(`${column.region}|${column.delay}`) || 0),
-            ));
+            const columnTotal = model.totals.get(`${column.region}|${column.delay}`) || 0;
+            const totalValue = createTotalValue(columnTotal, model.totalAlphaCount, 'wqp-distribution-total');
+            totalValue.title = `${column.region} · Delay ${column.delay}: ${columnTotal}/${model.totalAlphaCount} (${formatPercent(ratioToTotal(columnTotal, model.totalAlphaCount))})`;
+            totalValue.setAttribute('aria-label', totalValue.title);
+            totalCell.appendChild(totalValue);
             totalRow.appendChild(totalCell);
         });
+        const grandTotalCell = createElement('td', 'wqp-distribution-row-total-cell');
+        const grandTotal = createTotalValue(model.grandTotal, model.totalAlphaCount, 'wqp-distribution-total wqp-distribution-grand-total');
+        grandTotal.title = `全部 Region / Delay: ${model.grandTotal}/${model.totalAlphaCount} (${formatPercent(ratioToTotal(model.grandTotal, model.totalAlphaCount))})`;
+        grandTotal.setAttribute('aria-label', grandTotal.title);
+        grandTotalCell.appendChild(grandTotal);
+        totalRow.appendChild(grandTotalCell);
         foot.appendChild(totalRow);
 
         table.append(columns, head, body, foot);
