@@ -1,4 +1,4 @@
-﻿import { getLocalValue, setLocalValue } from './storageService.js';
+import { getLocalValue, setLocalValue } from './storageService.js';
 
 const CONFIG_KEY = 'WQP_SessionKeeperConfig';
 const STATE_KEY = 'WQP_SessionKeeperState';
@@ -38,11 +38,11 @@ let lastLoginAttempt = 0;
 let loginRetryCount = 0;
 let lastHeartbeatTime = Date.now();
 
-const LOGIN_COOLDOWN_MS = 60 * 1000;
+const LOGIN_COOLDOWN_MS = 30 * 1000;
 const MAX_LOGIN_RETRIES = 5;
 const WAKE_THRESHOLD_MS = 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
-const TOKEN_WRITE_THROTTLE_MS = 60 * 1000;
+const TOKEN_WRITE_THROTTLE_MS = 30 * 1000;
 
 function normalizeConfig(config = {}) {
     const keepAliveInterval = Number(config.keepAliveInterval);
@@ -57,7 +57,7 @@ function normalizeConfig(config = {}) {
         preemptiveBeforeExpiryHours: Number.isFinite(preemptiveBeforeExpiryHours) && preemptiveBeforeExpiryHours >= 0.1
             ? Math.min(12, preemptiveBeforeExpiryHours)
             : DEFAULT_CONFIG.preemptiveBeforeExpiryHours,
-        authEmail: typeof config.authEmail === 'string' ? config.authEmail : '',
+        authEmail: typeof config.authEmail === 'string' ? config.authEmail.trim() : '',
         authPassword: typeof config.authPassword === 'string' ? config.authPassword : '',
     };
 }
@@ -153,16 +153,25 @@ function parseJwtExpiry(token) {
     }
 }
 
-function readAuthenticationSession(data, now = Date.now()) {
-    const expirySeconds = Number(data?.token?.expiry);
-    const userId = String(data?.user?.id || '').trim();
-    if (!Number.isFinite(expirySeconds)) return null;
-    return {
-        userId,
-        expirySeconds,
-        sessionExpiry: now + Math.max(0, expirySeconds) * 1000,
-        sessionExpirySource: 'authentication',
-    };
+async function syncTokenFromCookies() {
+    try {
+        if (!chrome?.cookies) return null;
+        const cookie = await chrome.cookies.get({
+            url: 'https://platform.worldquantbrain.com',
+            name: 't',
+        }) || await chrome.cookies.get({
+            url: 'https://api.worldquantbrain.com',
+            name: 't',
+        });
+
+        if (!cookie || !cookie.value) return null;
+        const token = cookie.value.trim();
+        const expiry = parseJwtExpiry(token);
+        return { token, expiry };
+    } catch (e) {
+        console.warn('[WQP Session] Failed to read cookies:', e);
+        return null;
+    }
 }
 
 export async function handleCapturedSessionToken(token) {
@@ -230,6 +239,13 @@ async function checkSessionViaProbe() {
     const now = Date.now();
     try {
         await logDebug('Checking session via /authentication probe...');
+
+        // 1. 尝试从 Cookie 读取 JWT
+        const cookieInfo = await syncTokenFromCookies();
+        const jwtExpiry = cookieInfo?.expiry || null;
+        const jwtToken = cookieInfo?.token || '';
+
+        // 2. 发起 Probe GET 请求
         const response = await fetch(AUTHENTICATION_URL, {
             method: 'GET',
             mode: 'cors',
@@ -247,47 +263,73 @@ async function checkSessionViaProbe() {
                 userId: '',
                 sessionExpiry: null,
                 sessionExpirySource: 'authentication',
-                lastError: `Probe returned ${response.status}.`,
+                lastError: `Probe returned HTTP ${response.status} (Unauthorized).`,
             });
-            await logDebug(`Session expired. Probe returned ${response.status}.`);
+            await logDebug(`Session expired. Probe returned HTTP ${response.status}.`);
             return 'expired';
         }
 
         if (response.ok) {
             const data = await response.json().catch(() => null);
-            const authSession = readAuthenticationSession(data, now);
-            if (!authSession) {
-                await updateState({
-                    status: 'unknown',
-                    lastChecked: now,
-                    sessionExpiry: null,
-                    sessionExpirySource: 'authentication',
-                    lastError: 'Authentication response missing token.expiry.',
-                });
-                await logDebug('Authentication probe did not include token.expiry.');
-                return 'unknown';
+            const userId = String(data?.user?.id || '').trim();
+            const rawExpirySeconds = Number(data?.token?.expiry);
+
+            let sessionExpiry = null;
+            let sessionExpirySource = 'unknown';
+
+            if (Number.isFinite(rawExpirySeconds) && rawExpirySeconds > 0) {
+                sessionExpiry = now + Math.max(0, rawExpirySeconds) * 1000;
+                sessionExpirySource = 'authentication';
+            } else if (jwtExpiry && jwtExpiry > now) {
+                sessionExpiry = jwtExpiry;
+                sessionExpirySource = 'token';
+            } else if (userId) {
+                // 如果已获取 userId 但无精确过期秒数，使用 2 小时作为估算窗口
+                sessionExpiry = now + 2 * HOUR_MS;
+                sessionExpirySource = 'synthetic';
             }
-            if (authSession.expirySeconds <= 0) {
+
+            if (!userId && !sessionExpiry) {
                 await updateState({
                     status: 'expired',
                     lastChecked: now,
-                    userId: authSession.userId,
-                    sessionExpiry: authSession.sessionExpiry,
+                    userId: '',
+                    sessionExpiry: null,
                     sessionExpirySource: 'authentication',
-                    lastError: 'Authentication token is expired.',
+                    lastError: 'Session expired (no active user).',
                 });
-                await logDebug('Session expired. Authentication token expiry is non-positive.');
+                await logDebug('Session expired: authentication probe returned no active user.');
                 return 'expired';
             }
-            await updateState({
+
+            if (sessionExpiry && sessionExpiry <= now) {
+                await updateState({
+                    status: 'expired',
+                    lastChecked: now,
+                    userId,
+                    sessionExpiry,
+                    sessionExpirySource,
+                    lastError: 'Authentication token is expired.',
+                });
+                await logDebug('Session expired: authentication token expiry has passed.');
+                return 'expired';
+            }
+
+            const statePatch = {
                 status: 'valid',
                 lastChecked: now,
-                userId: authSession.userId,
-                sessionExpiry: authSession.sessionExpiry,
-                sessionExpirySource: authSession.sessionExpirySource,
+                userId,
+                sessionExpiry,
+                sessionExpirySource,
                 lastError: '',
-            });
-            await logDebug(`Session is valid for ${Math.round(authSession.expirySeconds)}s${authSession.userId ? ` (${authSession.userId})` : ''}.`);
+            };
+            if (jwtToken) {
+                statePatch.lastToken = jwtToken;
+                statePatch.lastTokenTime = now;
+            }
+            await updateState(statePatch);
+            const remainingSec = sessionExpiry ? Math.max(0, Math.round((sessionExpiry - now) / 1000)) : 0;
+            await logDebug(`Session is valid for ${remainingSec}s${userId ? ` (${userId})` : ''} [${sessionExpirySource}].`);
             return 'valid';
         }
 
@@ -296,9 +338,9 @@ async function checkSessionViaProbe() {
             lastChecked: now,
             sessionExpiry: null,
             sessionExpirySource: 'authentication',
-            lastError: `Probe returned ${response.status}.`,
+            lastError: `Probe returned HTTP ${response.status}.`,
         });
-        await logDebug(`Authentication probe returned ${response.status}.`);
+        await logDebug(`Authentication probe returned HTTP ${response.status}.`);
         return 'unknown';
     } catch (error) {
         await updateState({
@@ -313,6 +355,46 @@ async function checkSessionViaProbe() {
     }
 }
 
+async function loginViaApi(email, password) {
+    await logDebug(`Attempting direct API login for ${email}...`);
+    try {
+        const encoded = btoa(`${email}:${password}`);
+        const response = await fetch(AUTHENTICATION_URL, {
+            method: 'POST',
+            mode: 'cors',
+            credentials: 'include',
+            headers: {
+                Authorization: `Basic ${encoded}`,
+                Accept: 'application/json;version=2.0',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            },
+        });
+
+        if (response.status === 201) {
+            const data = await response.json().catch(() => null);
+            const userId = String(data?.user?.id || '').trim();
+            await logDebug(`API login successful (HTTP 201)${userId ? ` User: ${userId}` : ''}.`);
+            return { ok: true, userId, data };
+        }
+
+        if (response.status === 401) {
+            const wwwAuth = response.headers.get('WWW-Authenticate') || '';
+            const location = response.headers.get('Location') || '';
+            if (wwwAuth.toLowerCase().includes('persona') || location) {
+                await logDebug('API login requires biometric/persona authentication, falling back to tab.');
+                return { ok: false, needFallback: true, error: 'Biometric verification required.' };
+            }
+            return { ok: false, needFallback: false, error: 'Invalid email or password (401).' };
+        }
+
+        await logDebug(`API login returned HTTP ${response.status}, falling back to tab.`);
+        return { ok: false, needFallback: true, error: `API login returned HTTP ${response.status}.` };
+    } catch (error) {
+        await logDebug(`API login request failed: ${error.message}, falling back to tab.`);
+        return { ok: false, needFallback: true, error: error.message };
+    }
+}
+
 function autoFillAndSubmit(email, password) {
     function notify(status, message = '') {
         try {
@@ -322,7 +404,7 @@ function autoFillAndSubmit(email, password) {
         }
     }
 
-    function waitFor(selector, timeout = 8000) {
+    function waitFor(selector, timeout = 10000) {
         return new Promise((resolve) => {
             const found = document.querySelector(selector);
             if (found) {
@@ -357,7 +439,7 @@ function autoFillAndSubmit(email, password) {
             }
 
             const emailInput = await waitFor('input#email, input[name="email"], input[type="email"]');
-            const passwordInput = await waitFor('input#password, input[name="currentPassword"], input[type="password"]');
+            const passwordInput = await waitFor('input#password, input[name="password"], input[name="currentPassword"], input[type="password"]');
             if (!emailInput || !passwordInput) {
                 notify('error', 'Login inputs not found.');
                 return;
@@ -373,10 +455,14 @@ function autoFillAndSubmit(email, password) {
             }
             emailInput.dispatchEvent(new Event('input', { bubbles: true }));
             emailInput.dispatchEvent(new Event('change', { bubbles: true }));
+            emailInput.dispatchEvent(new Event('blur', { bubbles: true }));
             passwordInput.dispatchEvent(new Event('input', { bubbles: true }));
             passwordInput.dispatchEvent(new Event('change', { bubbles: true }));
+            passwordInput.dispatchEvent(new Event('blur', { bubbles: true }));
 
-            const submit = await waitFor('button[type="submit"], button.MuiButton-containedPrimary');
+            await new Promise((resolve) => setTimeout(resolve, 300));
+
+            const submit = await waitFor('button[type="submit"], button.MuiButton-containedPrimary, button:not([disabled])');
             if (submit) {
                 submit.click();
             } else {
@@ -403,7 +489,7 @@ function autoFillAndSubmit(email, password) {
                     notify('success');
                     return;
                 }
-                if (checks > 24) clearInterval(timer);
+                if (checks > 30) clearInterval(timer);
             }, 500);
         } catch (error) {
             notify('error', error.message);
@@ -411,10 +497,10 @@ function autoFillAndSubmit(email, password) {
     })();
 }
 
-async function performAutoLogin(email, password) {
+async function performAutoLoginViaTab(email, password) {
     let loginTabId = null;
     try {
-        await logDebug(`Starting background auto-login for ${email}...`);
+        await logDebug(`Starting background tab login for ${email}...`);
         const tab = await chrome.tabs.create({ url: SIGN_IN_URL, active: false });
         loginTabId = tab.id;
 
@@ -475,6 +561,27 @@ async function performAutoLogin(email, password) {
         });
 
         if (result === 'success') {
+            // 等待 1.5 秒确保 Cookie 写入持久化
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+            return { ok: true };
+        }
+        return { ok: false, error: result };
+    } finally {
+        if (loginTabId) {
+            try {
+                await chrome.tabs.remove(loginTabId);
+            } catch (_) {
+                // Ignore tab closure error
+            }
+        }
+    }
+}
+
+async function performAutoLogin(email, password) {
+    try {
+        // 第一轨：优先使用 API 快速直登
+        const apiResult = await loginViaApi(email, password);
+        if (apiResult.ok) {
             loginRetryCount = 0;
             const now = Date.now();
             await updateState({
@@ -484,38 +591,64 @@ async function performAutoLogin(email, password) {
                 lastChecked: now,
                 lastError: '',
             });
-            await logDebug('Auto-login succeeded. Refreshing authentication session.');
+            await logDebug('API login succeeded. Refreshing session probe...');
             await checkSessionViaProbe();
-        } else {
+            return true;
+        }
+
+        // 如果是凭据错误，直接终止重试
+        if (!apiResult.needFallback) {
             await updateState({
                 status: 'login-failed',
                 lastLoginAttemptTime: Date.now(),
                 lastLoginSuccess: false,
-                lastError: `Auto-login failed: ${result}`,
+                lastError: apiResult.error || 'Invalid credentials.',
             });
-            await logDebug(`Auto-login failed: ${result}`);
-            if (result !== 'error' && result !== 'Captcha or security check detected.' && loginRetryCount < MAX_LOGIN_RETRIES) {
-                setTimeout(() => {
-                    triggerAutoLogin().catch((error) => logDebug(`Retry failed: ${error.message}`));
-                }, LOGIN_COOLDOWN_MS + 1000);
-            }
+            await logDebug(`Auto-login halted: ${apiResult.error}`);
+            return false;
         }
+
+        // 第二轨：降级为后台 Tab 模拟登录
+        await logDebug('API login failed, falling back to background Tab login...');
+        const tabResult = await performAutoLoginViaTab(email, password);
+        if (tabResult.ok) {
+            loginRetryCount = 0;
+            const now = Date.now();
+            await updateState({
+                lastLoginTime: now,
+                lastLoginAttemptTime: now,
+                lastLoginSuccess: true,
+                lastChecked: now,
+                lastError: '',
+            });
+            await logDebug('Tab login succeeded. Refreshing session probe...');
+            await checkSessionViaProbe();
+            return true;
+        }
+
+        // 均失败
+        await updateState({
+            status: 'login-failed',
+            lastLoginAttemptTime: Date.now(),
+            lastLoginSuccess: false,
+            lastError: `Auto-login failed: ${tabResult.error}`,
+        });
+        await logDebug(`Auto-login failed: ${tabResult.error}`);
+        if (tabResult.error !== 'Captcha or security check detected.' && loginRetryCount < MAX_LOGIN_RETRIES) {
+            setTimeout(() => {
+                triggerAutoLogin().catch((error) => logDebug(`Retry failed: ${error.message}`));
+            }, LOGIN_COOLDOWN_MS + 1000);
+        }
+        return false;
     } finally {
-        if (loginTabId) {
-            try {
-                await chrome.tabs.remove(loginTabId);
-            } catch (_) {
-                // The user may have closed it.
-            }
-        }
         isLoginInProgress = false;
         await updateState({ isLoginInProgress: false });
     }
 }
 
-export async function triggerAutoLogin() {
+export async function triggerAutoLogin({ force = false } = {}) {
     const config = await getConfigRaw();
-    if (!config.enabled || !config.autoLoginEnabled) {
+    if (!config.enabled || (!config.autoLoginEnabled && !force)) {
         await logDebug('Auto-login skipped because it is disabled.');
         return false;
     }
@@ -529,25 +662,29 @@ export async function triggerAutoLogin() {
         return false;
     }
     const now = Date.now();
-    if (now - lastLoginAttempt < LOGIN_COOLDOWN_MS) {
+    if (!force && now - lastLoginAttempt < LOGIN_COOLDOWN_MS) {
         await logDebug('Auto-login cooldown is active.');
         return false;
     }
-    if (loginRetryCount >= MAX_LOGIN_RETRIES) {
+    if (!force && loginRetryCount >= MAX_LOGIN_RETRIES) {
         await logDebug('Auto-login retry limit reached.');
         return false;
     }
 
     isLoginInProgress = true;
     lastLoginAttempt = now;
-    loginRetryCount += 1;
+    if (force) {
+        loginRetryCount = 0;
+    } else {
+        loginRetryCount += 1;
+    }
+
     await updateState({
         isLoginInProgress: true,
         lastLoginAttemptTime: now,
         lastError: '',
     });
-    performAutoLogin(config.authEmail, deobfuscate(config.authPassword));
-    return true;
+    return performAutoLogin(config.authEmail, deobfuscate(config.authPassword));
 }
 
 export async function performKeepAlive({ manual = false } = {}) {
@@ -569,7 +706,9 @@ export async function performKeepAlive({ manual = false } = {}) {
     const status = await checkSessionViaProbe();
     loginRetryCount = 0;
     if (status === 'expired') {
-        await triggerAutoLogin();
+        if (config.autoLoginEnabled) {
+            await triggerAutoLogin();
+        }
         return getSessionKeeperState();
     }
 
@@ -621,6 +760,10 @@ export async function saveSessionKeeperConfig(input = {}) {
 
     const saved = await setConfigRaw(next);
     await logDebug('Session keeper settings saved.');
+    // 保存设置后若启用了保活，立即执行一次检查
+    if (saved.enabled) {
+        performKeepAlive().catch((err) => console.warn('Keep-alive after save failed:', err));
+    }
     return {
         config: sanitizeConfigForUi(saved),
         state: sanitizeStateForUi(await getStateRaw()),
@@ -657,3 +800,4 @@ export function initSessionKeeperService() {
 
     ensureDefaults().catch((error) => console.warn('Session keeper defaults failed:', error));
 }
+

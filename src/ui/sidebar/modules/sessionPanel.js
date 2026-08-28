@@ -1,4 +1,4 @@
-﻿import { sendMessage } from './runtimeClient.js';
+import { sendMessage } from './runtimeClient.js';
 import { setStatus } from './ui.js';
 
 const ids = {
@@ -79,6 +79,24 @@ function writeConfigToForm(config = {}) {
     getEl(ids.password).placeholder = hasSavedPassword ? '已保存；留空则保留' : '未保存';
 }
 
+function formatExpiryTime(expiry, source) {
+    if (!expiry) return `-（${expirySourceLabel(source)}）`;
+    const date = new Date(expiry);
+    if (Number.isNaN(date.getTime())) return `-（${expirySourceLabel(source)}）`;
+    const now = Date.now();
+    const diff = expiry - now;
+    let countdown = '';
+    if (diff <= 0) {
+        countdown = '已过期';
+    } else {
+        const totalMinutes = Math.floor(diff / 60000);
+        const hours = Math.floor(totalMinutes / 60);
+        const minutes = totalMinutes % 60;
+        countdown = hours > 0 ? `剩余 ${hours}小时${minutes}分` : `剩余 ${minutes}分钟`;
+    }
+    return `${date.toLocaleString()}（${countdown}，${expirySourceLabel(source)}）`;
+}
+
 function renderStatus(data = {}) {
     const config = data.config || {};
     const state = data.state || {};
@@ -89,7 +107,7 @@ function renderStatus(data = {}) {
             ['状态', `${statusLabel(state.status)}${state.isLoginInProgress ? '（重登中）' : ''}`],
             ['用户', state.userId || '-'],
             ['最近检查', formatTime(state.lastChecked)],
-            ['过期时间', `${formatTime(state.sessionExpiry)}（${expirySourceLabel(state.sessionExpirySource)}）`],
+            ['过期时间', formatExpiryTime(state.sessionExpiry, state.sessionExpirySource)],
             ['最近 Token', `${state.hasToken ? '已捕获' : '未捕获'} / ${formatTime(state.lastTokenTime)}`],
             ['最近重登', `${formatTime(state.lastLoginTime)} / ${state.lastLoginSuccess === true ? '成功' : state.lastLoginSuccess === false ? '失败' : '未触发'}`],
             ['自动重登', `${config.autoLoginEnabled ? '启用' : '关闭'}${config.hasPassword ? '，已保存密码' : ''}`],
