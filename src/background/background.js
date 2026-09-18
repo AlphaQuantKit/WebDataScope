@@ -581,7 +581,7 @@ async function loginAndOpenWqManager(wqId, currentTabId) {
 
         // 导航到 Profile 页面以触发 onUpdated 事件
         chrome.tabs.update(currentTabId, {
-            url: 'https://wqmanager.qzz.io/Profile'
+            url: 'https://wqmanager.icu/Profile'
         });
 
         chrome.tabs.onUpdated.addListener(listener);
