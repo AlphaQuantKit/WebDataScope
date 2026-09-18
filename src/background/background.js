@@ -529,7 +529,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 async function loginAndOpenWqManager(wqId, currentTabId) {
     // 在当前标签页打开登录页面
     currentTabId = await new Promise((resolve, reject) => {
-        chrome.tabs.create({ url: 'https://wqmanager.qzz.io/login', active: true }, (tab) => {
+        chrome.tabs.create({ url: 'https://wqmanager.icu/login', active: true }, (tab) => {
             if (chrome.runtime.lastError) return reject(chrome.runtime.lastError);
             resolve(tab.id);
         });
