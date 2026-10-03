@@ -5,6 +5,7 @@
     const REVISION_KEY = 'WQP_ProdMemo_DB_Revision';
     const CARD_ID = 'wqp-prod-memo-card';
     const MAX_RENDER_RETRIES = 20;
+    const DETAIL_REQUEST_TIMEOUT_MS = 15000;
     const MAIN_WORLD_DB_ACTIONS = new Set([
         'SAVE_ALPHA_BATCH',
         'SAVE_PNL',
@@ -16,6 +17,8 @@
     let currentAlphaId = '';
     let renderTimer = null;
     let renderRetryCount = 0;
+    let renderGeneration = 0;
+    let currentDetail = null;
     let calculationRunning = false;
     let calculationAlphaId = '';
     let calculationStatusMessage = '';
@@ -26,16 +29,29 @@
         console.log('[WQP ProdMemo]', ...args);
     }
 
-    function dbAction(action, payload = {}) {
+    function dbAction(action, payload = {}, options = {}) {
         return new Promise((resolve, reject) => {
-            chrome.runtime.sendMessage({ type: 'WQP_PRODMEMO_DB', action, payload }, (response) => {
-                if (chrome.runtime.lastError) {
-                    reject(chrome.runtime.lastError);
-                    return;
-                }
-                if (!response?.ok) reject(new Error(response?.error || 'ProdMemo 后台请求失败。'));
-                else resolve(response.data);
-            });
+            let settled = false;
+            let timeoutId = null;
+            function finish(callback, value) {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeoutId);
+                callback(value);
+            }
+            if (options.timeoutMs) {
+                timeoutId = setTimeout(() => finish(reject, new Error('读取本地关联性数据超时，请稍后重试。')), options.timeoutMs);
+            }
+            try {
+                chrome.runtime.sendMessage({ type: 'WQP_PRODMEMO_DB', action, payload }, (response) => {
+                    const runtimeError = chrome.runtime.lastError;
+                    if (runtimeError) finish(reject, runtimeError);
+                    else if (!response?.ok) finish(reject, new Error(response?.error || 'ProdMemo 后台请求失败。'));
+                    else finish(resolve, response.data);
+                });
+            } catch (error) {
+                finish(reject, error);
+            }
         });
     }
 
@@ -44,10 +60,51 @@
     }
 
     function getCurrentAlphaIdFromUrl() {
-        const match = window.location.href.match(/\/alphas?\/([^/?#]+)/);
-        const id = normalizeAlphaId(match?.[1]);
-        if (!id || ['unsubmitted', 'submitted', 'distribution'].includes(id)) return '';
-        return id;
+        // /alphas/<id> is an Alpha List; only /alpha/<id> identifies an Alpha.
+        const match = window.location.pathname.match(/^\/alpha\/([^/]+)(?:\/|$)/);
+        return normalizeAlphaId(match?.[1]);
+    }
+
+    function getCurrentAlphaIdFromPanel() {
+        const panel = document.querySelector('.alphas-details--active');
+        if (!panel) return null;
+        const link = panel.querySelector('a.alphas-details-content__link-lg[href]');
+        try {
+            if (!link?.href) return '';
+            const url = new URL(link.href, window.location.origin);
+            if (url.origin !== window.location.origin) return '';
+            return normalizeAlphaId(url.pathname.match(/^\/alpha\/([^/]+)(?:\/|$)/)?.[1]);
+        } catch (_) {
+            return '';
+        }
+    }
+
+    function getDisplayedAlphaId() {
+        return getCurrentAlphaIdFromPanel() ?? getCurrentAlphaIdFromUrl();
+    }
+
+    function isAlphaListPage() {
+        return /^\/alphas(?:\/|$)/.test(window.location.pathname);
+    }
+
+    function syncDisplayedAlpha() {
+        const alphaId = getDisplayedAlphaId();
+        const card = document.getElementById(CARD_ID);
+        if (alphaId) {
+            const panel = document.querySelector('.alphas-details--active');
+            const wrongMount = card && (panel
+                ? !panel.contains(card)
+                : Boolean(card.closest('.alphas-details')));
+            if (wrongMount) removeCard();
+            if (alphaId !== currentAlphaId || ((!card || wrongMount) && renderTimer === null)) scheduleRender(alphaId);
+        } else if (isAlphaListPage() || getCurrentAlphaIdFromPanel() !== null) {
+            currentAlphaId = '';
+            currentDetail = null;
+            renderGeneration += 1;
+            clearTimeout(renderTimer);
+            renderTimer = null;
+            removeCard();
+        }
     }
 
     function escapeHtml(value) {
@@ -144,10 +201,17 @@
     }
 
     function findCardAnchor() {
-        const title = document.querySelector('#alphas-correlation .correlation__title');
-        if (title) return { element: title, placement: 'after' };
-        const sections = Array.from(document.querySelectorAll('.correlation__content'));
-        const prodSection = sections.find((section) => /prod(?:uction)? correlation/i.test(section.textContent || ''));
+        const root = document.querySelector('.alphas-details--active') || document;
+        const title = root.querySelector('#alphas-correlation .correlation__title')
+            || root.querySelector('.correlation__title');
+        if (title && !title.closest('.alphas-details:not(.alphas-details--active)')) {
+            return { element: title, placement: 'after' };
+        }
+        const sections = Array.from(root.querySelectorAll('.correlation__content'));
+        const prodSection = sections.find((section) => (
+            !section.closest('.alphas-details:not(.alphas-details--active)')
+            && /prod(?:uction)? correlation/i.test(section.textContent || '')
+        ));
         return prodSection ? { element: prodSection, placement: 'append' } : null;
     }
 
@@ -155,9 +219,31 @@
         document.getElementById(CARD_ID)?.remove();
     }
 
-    async function renderCard(alphaId) {
+    function isCurrentRender(alphaId, generation) {
+        if (alphaId !== currentAlphaId || generation !== renderGeneration) return false;
+        const displayedId = getDisplayedAlphaId();
+        return displayedId ? displayedId === alphaId : !isAlphaListPage() && getCurrentAlphaIdFromPanel() === null;
+    }
+
+    function detailErrorMessage(error) {
+        const message = String(error?.message || error || '');
+        if (/Extension context invalidated|Receiving end does not exist|message port closed/i.test(message)) {
+            return '插件连接已失效，请刷新当前页面；若仍失败，请到扩展管理页重新加载插件。';
+        }
+        return /[\u4e00-\u9fff]/.test(message)
+            ? `读取关联性数据失败：${message}`
+            : '读取关联性数据失败，请重试；若仍失败，请刷新页面或重新加载插件。';
+    }
+
+    async function renderCard(alphaId, generation) {
         const normalizedId = normalizeAlphaId(alphaId);
-        if (!normalizedId || normalizedId !== currentAlphaId) return;
+        if (!normalizedId || !isCurrentRender(normalizedId, generation)) return;
+        const displayedId = getDisplayedAlphaId();
+        if (displayedId && displayedId !== normalizedId) {
+            syncDisplayedAlpha();
+            return;
+        }
+        if (!displayedId && isAlphaListPage()) return;
         const anchor = findCardAnchor();
         if (!anchor) {
             if (renderRetryCount < MAX_RENDER_RETRIES) {
@@ -167,8 +253,28 @@
             return;
         }
         renderRetryCount = 0;
-        const detail = await dbAction('GET_DETAIL', { alphaId: normalizedId });
-        if (normalizedId !== currentAlphaId) return;
+        mountCard(normalizedId, anchor, currentDetail || {}, { loading: true });
+        try {
+            const detail = await dbAction('GET_DETAIL', { alphaId: normalizedId }, { timeoutMs: DETAIL_REQUEST_TIMEOUT_MS });
+            if (!isCurrentRender(normalizedId, generation)) return;
+            const nextAnchor = findCardAnchor();
+            if (!nextAnchor || nextAnchor.element.isConnected === false) {
+                scheduleRender(normalizedId, 500);
+                return;
+            }
+            currentDetail = detail || {};
+            mountCard(normalizedId, nextAnchor, currentDetail);
+        } catch (error) {
+            if (!isCurrentRender(normalizedId, generation)) return;
+            log('detail load failed', error);
+            const nextAnchor = findCardAnchor();
+            if (nextAnchor && nextAnchor.element.isConnected !== false) {
+                mountCard(normalizedId, nextAnchor, currentDetail || {}, { error: detailErrorMessage(error) });
+            }
+        }
+    }
+
+    function mountCard(normalizedId, anchor, detail, options = {}) {
         const localLower = detail.local?.prodLowerBound;
         const lowerValue = !localLower?.stale && localLower?.result?.available
             ? Number(localLower.result.max)
@@ -193,11 +299,18 @@
                         <span>当前日期 <strong>${formatDateOnly(Date.now())}</strong></span>
                     </div>
                     <button id="wqp-prod-calculate-local" class="wqp-prod-calculate" type="button"
-                        ${calculationRunning ? 'disabled' : ''}>
+                        ${calculationRunning || !currentDetail ? 'disabled' : ''}>
                         ${calculationRunning ? '本地计算中…' : '本地计算 Corr'}
                     </button>
                 </div>
             </div>
+            ${options.loading ? '<div class="wqp-prod-detail-status" aria-live="polite">正在读取本地关联性数据…</div>' : ''}
+            ${options.error ? `
+                <div class="wqp-prod-detail-status error" aria-live="polite">
+                    <span>${escapeHtml(options.error)}</span>
+                    <button id="wqp-prod-retry-detail" class="wqp-prod-retry" type="button">重试</button>
+                </div>
+            ` : ''}
             <div class="wqp-prod-source-block">
                 <div class="wqp-prod-source-title"><span class="wqp-prod-source-badge is-platform">Ⓟ Platform</span> 平台返回</div>
                 <div class="wqp-prod-grid">
@@ -225,6 +338,7 @@
         if (anchor.placement === 'after') anchor.element.insertAdjacentElement('afterend', card);
         else anchor.element.appendChild(card);
         card.querySelector('#wqp-prod-calculate-local')?.addEventListener('click', startLocalCalculation);
+        card.querySelector('#wqp-prod-retry-detail')?.addEventListener('click', () => scheduleRender(normalizedId, 0));
     }
 
     function scheduleRender(alphaId, delay = 200) {
@@ -234,11 +348,15 @@
             renderRetryCount = 0;
             calculationStatusMessage = '';
             calculationStatusMode = '';
+            currentDetail = null;
+            removeCard();
         }
         currentAlphaId = normalizedId;
         clearTimeout(renderTimer);
+        const generation = ++renderGeneration;
         renderTimer = setTimeout(() => {
-            renderCard(currentAlphaId).catch((error) => log('render failed', error));
+            renderTimer = null;
+            renderCard(normalizedId, generation).catch((error) => log('render failed', error));
         }, delay);
     }
 
@@ -356,7 +474,9 @@
             return;
         }
         if (event.data.type === 'WQP_PRODMEMO_ALPHA_VIEW') {
-            scheduleRender(event.data.alphaId);
+            const alphaId = getDisplayedAlphaId();
+            if (alphaId) scheduleRender(alphaId);
+            else if (!isAlphaListPage() && getCurrentAlphaIdFromPanel() === null) scheduleRender(event.data.alphaId);
             return;
         }
         if (event.data.type === 'WQP_PRODMEMO_SYNC_PROGRESS') {
@@ -393,25 +513,24 @@
         if (currentAlphaId) scheduleRender(currentAlphaId);
     });
 
-    const observer = new MutationObserver(() => {
-        const urlAlphaId = getCurrentAlphaIdFromUrl();
-        const card = document.getElementById(CARD_ID);
-        if (urlAlphaId && (urlAlphaId !== currentAlphaId || !card)) scheduleRender(urlAlphaId);
-    });
+    const observer = new MutationObserver(syncDisplayedAlpha);
 
     function initialize() {
-        observer.observe(document, { childList: true, subtree: true });
+        observer.observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'href'] });
         syncCacheToPage().catch((error) => log('initial cache sync failed', error));
-        const alphaId = getCurrentAlphaIdFromUrl();
-        if (alphaId) scheduleRender(alphaId);
+        syncDisplayedAlpha();
         let lastUrl = location.href;
         setInterval(() => {
             if (location.href === lastUrl) return;
             lastUrl = location.href;
-            const nextAlphaId = getCurrentAlphaIdFromUrl();
+            const nextAlphaId = getDisplayedAlphaId();
             if (nextAlphaId) scheduleRender(nextAlphaId);
             else {
                 currentAlphaId = '';
+                currentDetail = null;
+                renderGeneration += 1;
+                clearTimeout(renderTimer);
+                renderTimer = null;
                 removeCard();
             }
         }, 800);

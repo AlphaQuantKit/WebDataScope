@@ -203,6 +203,26 @@
 .wqp-prod-calc-status.error { color: #b91c1c; }
 .wqp-prod-calc-status.success { color: #15803d; }
 
+.wqp-prod-detail-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    color: #475569;
+}
+
+.wqp-prod-detail-status.error { color: #b91c1c; }
+
+.wqp-prod-retry {
+    flex: 0 0 auto;
+    padding: 3px 10px;
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    background: #fff;
+    color: inherit;
+    cursor: pointer;
+}
+
 @media (max-width: 760px) {
     .wqp-prod-grid { grid-template-columns: 1fr; }
     .wqp-prod-header { align-items: stretch; flex-direction: column; }

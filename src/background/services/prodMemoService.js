@@ -14,6 +14,7 @@ import {
     clearStores,
     deleteAlphaCorrRecords,
     getAllRecords,
+    getLatestSubmittedAt,
     getProdMemoLightSnapshot,
     getRecord,
     getRecords,
@@ -445,11 +446,36 @@ function publicAlphaRecord(alpha) {
     };
 }
 
+function buildResolvedEntry(snapshot, alphaId, maps = snapshotMaps(snapshot)) {
+    const platform = maps.platformById.get(alphaId) || null;
+    const selfLocal = maps.localByKey.get(`${alphaId}|SELF`);
+    const poolLocal = maps.localByKey.get(`${alphaId}|POOL`);
+    const prodLocal = maps.localByKey.get(`${alphaId}|PROD_LOWER_BOUND`);
+    const decoratedSelf = selfLocal ? decorateLocalRecord(snapshot, selfLocal, maps) : null;
+    const decoratedPool = poolLocal ? decorateLocalRecord(snapshot, poolLocal, maps) : null;
+    const decoratedProd = prodLocal ? decorateLocalRecord(snapshot, prodLocal, maps) : null;
+    const resolved = {
+        prod: resolvePreferredCorrelation(platform?.prod, decoratedProd, { lowerBound: true }),
+        pool: resolvePreferredCorrelation(platform?.pool, decoratedPool),
+        self: resolvePreferredCorrelation(platform?.self, decoratedSelf),
+    };
+    return {
+        alphaId,
+        alpha: publicAlphaRecord(maps.alphaById.get(alphaId)),
+        platform: publicPlatformRecord(platform),
+        local: { self: decoratedSelf, pool: decoratedPool, prodLowerBound: decoratedProd },
+        resolved,
+        display: {
+            prod: formatResolvedMetric(resolved.prod),
+            pool: formatResolvedMetric(resolved.pool),
+            self: formatResolvedMetric(resolved.self),
+        },
+    };
+}
+
 async function buildResolvedEntries(alphaIds = null) {
     await ensureLegacyMigration();
-    // The list view only needs PnL fingerprints to determine whether local
-    // Corr records are stale. Loading every PnL point here blocks the sidebar
-    // for large accounts; full PnL is loaded only when a calculation runs.
+    // Display reads need fingerprints, never the complete personal PnL.
     const snapshot = await getCalculationSnapshot({ fullPnl: false });
     const maps = snapshotMaps(snapshot);
     const requested = alphaIds ? new Set(alphaIds.map(normalizeAlphaId)) : null;
@@ -458,36 +484,12 @@ async function buildResolvedEntries(alphaIds = null) {
         ...snapshot.localCorrs.map((record) => record.alphaId),
     ]);
     const result = {};
+    let processed = 0;
     for (const alphaId of ids) {
         if (requested && !requested.has(alphaId)) continue;
-        const platform = maps.platformById.get(alphaId) || null;
-        const selfLocal = maps.localByKey.get(`${alphaId}|SELF`);
-        const poolLocal = maps.localByKey.get(`${alphaId}|POOL`);
-        const prodLocal = maps.localByKey.get(`${alphaId}|PROD_LOWER_BOUND`);
-        const decoratedSelf = selfLocal ? decorateLocalRecord(snapshot, selfLocal, maps) : null;
-        const decoratedPool = poolLocal ? decorateLocalRecord(snapshot, poolLocal, maps) : null;
-        const decoratedProd = prodLocal ? decorateLocalRecord(snapshot, prodLocal, maps) : null;
-        const resolved = {
-            prod: resolvePreferredCorrelation(platform?.prod, decoratedProd, { lowerBound: true }),
-            pool: resolvePreferredCorrelation(platform?.pool, decoratedPool),
-            self: resolvePreferredCorrelation(platform?.self, decoratedSelf),
-        };
-        result[alphaId] = {
-            alphaId,
-            alpha: publicAlphaRecord(maps.alphaById.get(alphaId)),
-            platform: publicPlatformRecord(platform),
-            local: {
-                self: decoratedSelf,
-                pool: decoratedPool,
-                prodLowerBound: decoratedProd,
-            },
-            resolved,
-            display: {
-                prod: formatResolvedMetric(resolved.prod),
-                pool: formatResolvedMetric(resolved.pool),
-                self: formatResolvedMetric(resolved.self),
-            },
-        };
+        result[alphaId] = buildResolvedEntry(snapshot, alphaId, maps);
+        // A large sidebar refresh must leave time for a selected card's read.
+        if (++processed % 25 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
     }
     return { snapshot, entries: result };
 }
@@ -662,22 +664,22 @@ export async function calculateLocalCorrs(alphaId) {
 
 export async function getProdMemoDetail(alphaId) {
     const normalizedId = normalizeAlphaId(alphaId);
-    const { snapshot, entries } = await buildResolvedEntries([normalizedId]);
-    const latestSubmittedAt = snapshot.alphas.reduce((latest, alpha) => {
-        if (!alpha.submitted || !alpha.dateSubmitted) return latest;
-        return !latest || Date.parse(alpha.dateSubmitted) > Date.parse(latest)
-            ? alpha.dateSubmitted
-            : latest;
-    }, '');
-    const detail = entries[normalizedId] || {
-        alphaId: normalizedId,
-        alpha: null,
-        platform: null,
-        local: { self: null, pool: null, prodLowerBound: null },
-        resolved: { prod: null, pool: null, self: null },
-        display: { prod: '', pool: '', self: '' },
-    };
-    return { ...detail, latestSubmittedAt };
+    await ensureLegacyMigration();
+    const [alpha, platform, localCorrs] = await Promise.all([
+        getRecord(PROD_MEMO_STORES.alphas, normalizedId),
+        getRecord(PROD_MEMO_STORES.platformCorrs, normalizedId),
+        getRecords(PROD_MEMO_STORES.localCorrs, ['SELF', 'POOL', 'PROD_LOWER_BOUND'].map((type) => [normalizedId, type])),
+    ]);
+    const snapshot = localCorrs.length
+        ? await getCalculationSnapshot({ fullPnl: false, includeShared: localCorrs.some((record) => record.corrType === 'PROD_LOWER_BOUND') })
+        : {
+            alphas: alpha ? [alpha] : [],
+            platformCorrs: platform ? [platform] : [],
+            localCorrs: [],
+            pnlIds: [],
+        };
+    const latestSubmittedAt = await getLatestSubmittedAt();
+    return { ...buildResolvedEntry(snapshot, normalizedId), latestSubmittedAt };
 }
 
 export async function getResolvedProdMemoCache(alphaIds = null) {
@@ -800,7 +802,7 @@ export async function getShareUploadSnapshot() {
     };
 }
 
-async function getCalculationSnapshot({ fullPnl = true } = {}) {
+async function getCalculationSnapshot({ fullPnl = true, includeShared = true } = {}) {
     const base = await getProdMemoLightSnapshot();
     const personalPnlRecords = fullPnl
         ? getAllRecords(PROD_MEMO_STORES.pnls)
@@ -810,7 +812,7 @@ async function getCalculationSnapshot({ fullPnl = true } = {}) {
         }));
     const [personalPnls, sharedRecords] = await Promise.all([
         Promise.resolve(personalPnlRecords),
-        getSharedSnapshotRecords({ fullPnl }),
+        includeShared ? getSharedSnapshotRecords({ fullPnl }) : [],
     ]);
     const sharedAlphas = sharedRecords.map((record) => {
         const [region = '', universe = '', rawDelay = 'D1'] = String(record.groupKey || '').split('|');

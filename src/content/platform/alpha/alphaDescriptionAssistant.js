@@ -5,7 +5,7 @@
     window.__WQP_ALPHA_DESCRIPTION_ASSISTANT__ = true;
 
     const CONTROL_CLASS = 'wqp-alpha-description-ai';
-    const ALPHA_URL_PATTERN = /\/alphas?\/([^/?#]+)/i;
+    const ALPHA_URL_PATTERN = /^\/alpha\/([^/]+)(?:\/|$)/i;
     const RESERVED_ALPHA_PATHS = new Set(['unsubmitted', 'submitted', 'distribution']);
     const MAX_FIELDS = 12;
     const FIELD_FETCH_CONCURRENCY = 4;
@@ -25,7 +25,10 @@
 
     function getAlphaIdFromUrl(value = location.href) {
         try {
-            const match = new URL(value, location.origin).pathname.match(ALPHA_URL_PATTERN);
+            if (!value) return '';
+            const url = new URL(value, location.origin);
+            if (url.origin !== location.origin) return '';
+            const match = url.pathname.match(ALPHA_URL_PATTERN);
             return normalizeAlphaId(match?.[1]);
         } catch (_) {
             return '';
@@ -33,12 +36,24 @@
     }
 
     function getAlphaIdFromDialog() {
-        const link = document.querySelector('[role="dialog"] a[href*="/alpha"]');
-        return getAlphaIdFromUrl(link?.href || '');
+        const panel = document.querySelector('.alphas-details--active');
+        if (panel) {
+            const link = panel.querySelector('a.alphas-details-content__link-lg[href]');
+            return getAlphaIdFromUrl(link?.href || '');
+        }
+        const links = document.querySelectorAll('[role="dialog"] a[href*="/alpha/"]');
+        for (const link of links) {
+            const alphaId = getAlphaIdFromUrl(link.href);
+            if (alphaId) return alphaId;
+        }
+        return '';
     }
 
     function getAlphaId() {
-        return getAlphaIdFromUrl() || getAlphaIdFromDialog() || observedAlphaId;
+        const dialogId = getAlphaIdFromDialog();
+        if (document.querySelector('.alphas-details--active')) return dialogId;
+        return dialogId || getAlphaIdFromUrl()
+            || (/^\/alphas(?:\/|$)/.test(new URL(location.href).pathname) ? '' : observedAlphaId);
     }
 
     function isVisible(element) {
@@ -516,7 +531,7 @@
 
     function startObserver() {
         const observer = new MutationObserver(() => scheduleControls());
-        observer.observe(document.documentElement, { childList: true, subtree: true });
+        observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'href'] });
         setInterval(() => {
             if (location.href !== lastUrl) {
                 lastUrl = location.href;

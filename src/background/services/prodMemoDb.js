@@ -1,6 +1,9 @@
+import { pnlFingerprint } from './prodMemoCalculator.js';
+
 export const PROD_MEMO_DB_NAME = 'WQP_ProdMemoDB';
 export const PROD_MEMO_DB_VERSION = 5;
 const PNL_FINGERPRINT_INDEX = 'byFingerprint';
+const SHARED_METADATA_BATCH_SIZE = 128;
 
 export const PROD_MEMO_STORES = Object.freeze({
     alphas: 'alphas',
@@ -14,6 +17,14 @@ export const PROD_MEMO_STORES = Object.freeze({
 });
 
 let dbPromise = null;
+let sharedMetadataPromise = null;
+let latestSubmittedPromise = null;
+
+function invalidateDerivedReads(storeNames) {
+    const names = Array.isArray(storeNames) ? storeNames : [storeNames];
+    if (names.includes(PROD_MEMO_STORES.sharedRecords)) sharedMetadataPromise = null;
+    if (names.includes(PROD_MEMO_STORES.alphas)) latestSubmittedPromise = null;
+}
 
 function compactAlphaRecord(alpha) {
     const settings = alpha?.settings || {};
@@ -119,6 +130,8 @@ export function openProdMemoDatabase() {
             db.onversionchange = () => {
                 db.close();
                 dbPromise = null;
+                sharedMetadataPromise = null;
+                latestSubmittedPromise = null;
             };
             resolve(db);
         };
@@ -151,32 +164,63 @@ export async function getAllRecords(storeName) {
     return requestResult(transaction.objectStore(storeName).getAll());
 }
 
-export async function getSharedSnapshotMetadata() {
+async function readSharedSnapshotMetadata() {
     const db = await openProdMemoDatabase();
     const transaction = db.transaction(PROD_MEMO_STORES.sharedRecords, 'readonly');
-    const request = transaction.objectStore(PROD_MEMO_STORES.sharedRecords).openCursor();
+    const store = transaction.objectStore(PROD_MEMO_STORES.sharedRecords);
     return new Promise((resolve, reject) => {
         const records = [];
-        request.onsuccess = () => {
-            const cursor = request.result;
-            if (!cursor) {
-                resolve(records);
-                return;
-            }
-            const value = cursor.value || {};
-            records.push({
-                alias: value.alias,
-                sourceType: value.sourceType,
-                groupKey: value.groupKey,
-                prodCorr: value.prodCorr,
-                classifications: value.classifications,
-                updatedAt: value.updatedAt,
-                fingerprint: value.fingerprint || '',
-            });
-            cursor.continue();
-        };
-        request.onerror = () => reject(request.error);
+        transaction.onabort = () => reject(transaction.error || new Error('读取共享参考数据的事务已中止。'));
+        function nextBatch(range) {
+            const request = store.getAll(range, SHARED_METADATA_BATCH_SIZE);
+            request.onerror = () => reject(request.error);
+            request.onsuccess = () => {
+                try {
+                    const batch = request.result;
+                    batch.forEach((value) => records.push({
+                        alias: value.alias,
+                        sourceType: value.sourceType,
+                        groupKey: value.groupKey,
+                        prodCorr: value.prodCorr,
+                        classifications: value.classifications,
+                        updatedAt: value.updatedAt,
+                        fingerprint: value.fingerprint || pnlFingerprint(value.pnl),
+                    }));
+                    if (batch.length < SHARED_METADATA_BATCH_SIZE) resolve(records);
+                    else nextBatch(IDBKeyRange.lowerBound(batch.at(-1).alias, true));
+                } catch (error) {
+                    reject(error);
+                }
+            };
+        }
+        nextBatch();
     });
+}
+
+export function getSharedSnapshotMetadata() {
+    if (!sharedMetadataPromise) {
+        const pending = readSharedSnapshotMetadata().catch((error) => {
+            if (sharedMetadataPromise === pending) sharedMetadataPromise = null;
+            throw error;
+        });
+        sharedMetadataPromise = pending;
+    }
+    return sharedMetadataPromise;
+}
+
+export function getLatestSubmittedAt() {
+    if (!latestSubmittedPromise) {
+        const pending = getAllRecords(PROD_MEMO_STORES.alphas).then((records) => records.reduce((latest, alpha) => {
+            if (!alpha.submitted || !alpha.dateSubmitted) return latest;
+            return !latest || Date.parse(alpha.dateSubmitted) > Date.parse(latest)
+                ? alpha.dateSubmitted : latest;
+        }, '')).catch((error) => {
+            if (latestSubmittedPromise === pending) latestSubmittedPromise = null;
+            throw error;
+        });
+        latestSubmittedPromise = pending;
+    }
+    return latestSubmittedPromise;
 }
 
 export async function getRecord(storeName, key) {
@@ -200,6 +244,7 @@ export async function putRecord(storeName, record) {
     const transaction = db.transaction(storeName, 'readwrite');
     transaction.objectStore(storeName).put(record);
     await transactionDone(transaction);
+    invalidateDerivedReads(storeName);
     return record;
 }
 
@@ -210,6 +255,7 @@ export async function putRecords(storeName, records) {
     const store = transaction.objectStore(storeName);
     records.forEach((record) => store.put(record));
     await transactionDone(transaction);
+    invalidateDerivedReads(storeName);
     return { saved: records.length };
 }
 
@@ -218,6 +264,7 @@ export async function deleteRecord(storeName, key) {
     const transaction = db.transaction(storeName, 'readwrite');
     transaction.objectStore(storeName).delete(key);
     await transactionDone(transaction);
+    invalidateDerivedReads(storeName);
 }
 
 export async function clearStores(storeNames) {
@@ -225,6 +272,7 @@ export async function clearStores(storeNames) {
     const transaction = db.transaction(storeNames, 'readwrite');
     storeNames.forEach((storeName) => transaction.objectStore(storeName).clear());
     await transactionDone(transaction);
+    invalidateDerivedReads(storeNames);
 }
 
 export async function getShareKey(key = 'default') {
@@ -252,6 +300,7 @@ export async function replaceSharedSnapshot(records, meta = {}) {
         updatedAt: Date.now(),
     });
     await transactionDone(transaction);
+    invalidateDerivedReads(PROD_MEMO_STORES.sharedRecords);
     return { saved: records?.length || 0, meta };
 }
 
@@ -342,5 +391,6 @@ export async function markSubmittedSnapshot(alphaIds) {
         }
     });
     await transactionDone(transaction);
+    invalidateDerivedReads(PROD_MEMO_STORES.alphas);
     return { marked };
 }
